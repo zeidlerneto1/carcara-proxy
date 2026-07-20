@@ -1,0 +1,28 @@
+{
+  "token": "fda0b93de0dc3d60b46b1dc7148f38770244a08e9073b65a83319110bfb15b4e",
+  "cookies": [
+    {
+      "name": "PHPSESSID",
+      "value": "149p5d50fb0rpamb417sci53ep",
+      "domain": "carcara.sinapad.lncc.br",
+      "path": "/",
+      "expires": -1,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "carcara_auth",
+      "value": "cHplaWRsZXJ8MTc4NDYwNjYzOA.ACaWsb4gswpHpP7oUo9kNQb1X_DDC-kjym-QOiSDyEc",
+      "domain": "carcara.sinapad.lncc.br",
+      "path": "/",
+      "expires": 1784606638.046173,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "Strict"
+    }
+  ],
+  "phpsessid": "149p5d50fb0rpamb417sci53ep",
+  "timestamp": 1784563444164,
+  "carcaraAuth": "cHplaWRsZXJ8MTc4NDYwNjYzOA.ACaWsb4gswpHpP7oUo9kNQb1X_DDC-kjym-QOiSDyEc"
+}

@@ -1,0 +1,55 @@
+{
+  "timestamp": 1784563444204,
+  "models": [
+    {
+      "id": "Qwen3.6-35B",
+      "aliases": [
+        "carcara-coder"
+      ],
+      "tags": [],
+      "object": "model",
+      "created": 1784563444,
+      "owned_by": "llamacpp",
+      "meta": {
+        "vocab_type": 2,
+        "n_vocab": 248320,
+        "n_ctx": 32768,
+        "n_ctx_train": 262144,
+        "n_embd": 2048,
+        "n_params": 34660610688,
+        "size": 69365647872
+      },
+      "name": "Qwen3.6-35B",
+      "status": {
+        "value": "loaded"
+      },
+      "max_input_tokens": 32768,
+      "max_output_tokens": 4096
+    },
+    {
+      "id": "Qwen3-VL-235B",
+      "aliases": [
+        "carcara-vision"
+      ],
+      "tags": [],
+      "object": "model",
+      "created": 1784563444,
+      "owned_by": "llamacpp",
+      "meta": {
+        "vocab_type": 2,
+        "n_vocab": 151936,
+        "n_ctx": 7680,
+        "n_ctx_train": 262144,
+        "n_embd": 4096,
+        "n_params": 235093634560,
+        "size": 134218508288
+      },
+      "name": "Qwen3-VL-235B",
+      "status": {
+        "value": "loaded"
+      },
+      "max_input_tokens": 7680,
+      "max_output_tokens": 4096
+    }
+  ]
+}

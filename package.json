@@ -1,0 +1,92 @@
+{
+  "name": "carcara-lncc-client",
+  "version": "1.0.0",
+  "description": "Cliente API e Chat para Carcara LNCC usando Playwright e IndexedDB - OpenRouter Wrapper",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "dev": "ts-node src/index.ts",
+    "server": "ts-node src/server.ts",
+    "debug": "ts-node src/debug-login.ts",
+    "test": "playwright test",
+    "test:headed": "playwright test --headed",
+    "lint": "eslint src/**/*.ts",
+    "lint:fix": "eslint src/**/*.ts --fix",
+    "format": "prettier --write \"src/**/*.ts\"",
+    "format:check": "prettier --check \"src/**/*.ts\"",
+    "clean": "rm -rf dist .carcara test-results",
+    "clean:logs": "rm -rf .carcara/*.log",
+    "setup": "npm install && npx playwright install chromium",
+    "postinstall": "npx playwright install chromium",
+    "prepare": "npm run build"
+  },
+  "dependencies": {
+    "@types/express": "^4.17.21",
+    "axios": "^1.7.2",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.1",
+    "playwright": "^1.47.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.47.0",
+    "@types/cors": "^2.8.17",
+    "@types/node": "^20.16.0",
+    "@typescript-eslint/eslint-plugin": "^7.0.0",
+    "@typescript-eslint/parser": "^7.0.0",
+    "eslint": "^8.57.0",
+    "prettier": "^3.3.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.5.0"
+  },
+  "keywords": [
+    "lncc",
+    "carcara",
+    "sinapad",
+    "renanci",
+    "openrouter",
+    "llama",
+    "playwright",
+    "typescript",
+    "indexeddb",
+    "chatbot",
+    "ai",
+    "mcp",
+    "santos-dumont",
+    "hpc",
+    "api-wrapper"
+  ],
+  "author": {
+    "name": "Peter Zeidler",
+    "email": "peter@example.com",
+    "url": "https://github.com/pzeidler"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pzeidler/carcara-lncc-client"
+  },
+  "bugs": {
+    "url": "https://github.com/pzeidler/carcara-lncc-client/issues"
+  },
+  "homepage": "https://github.com/pzeidler/carcara-lncc-client#readme",
+  "engines": {
+    "node": ">=18.0.0",
+    "npm": ">=9.0.0"
+  },
+  "files": [
+    "dist",
+    "src",
+    ".env.example",
+    "README.md",
+    "LICENSE"
+  ],
+  "directories": {
+    "src": "src",
+    "dist": "dist",
+    "test": "tests",
+    "log": ".carcara"
+  },
+  "type": "commonjs"
+}
