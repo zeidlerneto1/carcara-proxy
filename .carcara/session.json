@@ -1,9 +1,9 @@
 {
-  "token": "fda0b93de0dc3d60b46b1dc7148f38770244a08e9073b65a83319110bfb15b4e",
+  "token": "587e98d1a9c3a617ccb741ae78f7bcc84557ba85fe0eb15d9bdd3c1d7928a624",
   "cookies": [
     {
       "name": "PHPSESSID",
-      "value": "149p5d50fb0rpamb417sci53ep",
+      "value": "n9ht3tqhm8d8ghb2a8jjokghbe",
       "domain": "carcara.sinapad.lncc.br",
       "path": "/",
       "expires": -1,
@@ -13,16 +13,16 @@
     },
     {
       "name": "carcara_auth",
-      "value": "cHplaWRsZXJ8MTc4NDYwNjYzOA.ACaWsb4gswpHpP7oUo9kNQb1X_DDC-kjym-QOiSDyEc",
+      "value": "cHplaWRsZXJ8MTc4NDcwODEzMQ.GU4Nlfl2iutL6mA0mZ5XUapUk-bEcuNucdy_ArHI2X8",
       "domain": "carcara.sinapad.lncc.br",
       "path": "/",
-      "expires": 1784606638.046173,
+      "expires": 1784708131.402325,
       "httpOnly": true,
       "secure": true,
       "sameSite": "Strict"
     }
   ],
-  "phpsessid": "149p5d50fb0rpamb417sci53ep",
-  "timestamp": 1784563444164,
-  "carcaraAuth": "cHplaWRsZXJ8MTc4NDYwNjYzOA.ACaWsb4gswpHpP7oUo9kNQb1X_DDC-kjym-QOiSDyEc"
+  "phpsessid": "n9ht3tqhm8d8ghb2a8jjokghbe",
+  "timestamp": 1784664937522,
+  "carcaraAuth": "cHplaWRsZXJ8MTc4NDcwODEzMQ.GU4Nlfl2iutL6mA0mZ5XUapUk-bEcuNucdy_ArHI2X8"
 }
