@@ -1,0 +1,452 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LNCC - Laboratório Nacional de Computação Científica</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            color: #333;
+            line-height: 1.6;
+        }
+
+        /* Header */
+        header {
+            background: linear-gradient(135deg, #003366 0%, #004a99 100%);
+            color: white;
+            padding: 0;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+        }
+
+        .header-top {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 15px 30px;
+        }
+
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+
+        .logo-icon {
+            width: 60px;
+            height: 60px;
+            background: white;
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            color: #003366;
+            font-size: 18px;
+        }
+
+        .logo-text h1 {
+            font-size: 24px;
+            font-weight: 700;
+        }
+
+        .logo-text span {
+            font-size: 13px;
+            opacity: 0.9;
+        }
+
+        nav ul {
+            list-style: none;
+            display: flex;
+            gap: 30px;
+        }
+
+        nav ul li a {
+            color: white;
+            text-decoration: none;
+            font-weight: 500;
+            padding: 8px 0;
+            transition: opacity 0.3s;
+        }
+
+        nav ul li a:hover {
+            opacity: 0.8;
+        }
+
+        /* Hero */
+        .hero {
+            background: linear-gradient(135deg, #001a33 0%, #003366 50%, #004a99 100%);
+            color: white;
+            padding: 80px 30px;
+            text-align: center;
+        }
+
+        .hero h2 {
+            font-size: 42px;
+            margin-bottom: 20px;
+            font-weight: 300;
+        }
+
+        .hero h2 strong {
+            font-weight: 700;
+        }
+
+        .hero p {
+            font-size: 18px;
+            max-width: 700px;
+            margin: 0 auto 30px;
+            opacity: 0.9;
+        }
+
+        .hero-btn {
+            display: inline-block;
+            background: #00a86b;
+            color: white;
+            padding: 14px 35px;
+            border-radius: 30px;
+            text-decoration: none;
+            font-weight: 600;
+            font-size: 16px;
+            transition: background 0.3s, transform 0.3s;
+        }
+
+        .hero-btn:hover {
+            background: #008f5a;
+            transform: translateY(-2px);
+        }
+
+        /* Sections */
+        section {
+            padding: 70px 30px;
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        section h2 {
+            font-size: 32px;
+            color: #003366;
+            margin-bottom: 15px;
+            text-align: center;
+        }
+
+        section .subtitle {
+            text-align: center;
+            color: #666;
+            margin-bottom: 50px;
+            font-size: 16px;
+        }
+
+        /* About */
+        .about-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 30px;
+        }
+
+        .about-card {
+            background: #f8f9fa;
+            border-radius: 12px;
+            padding: 35px 30px;
+            text-align: center;
+            transition: transform 0.3s, box-shadow 0.3s;
+            border: 1px solid #e9ecef;
+        }
+
+        .about-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+        }
+
+        .about-card .icon {
+            font-size: 48px;
+            margin-bottom: 20px;
+        }
+
+        .about-card h3 {
+            color: #003366;
+            margin-bottom: 12px;
+            font-size: 20px;
+        }
+
+        .about-card p {
+            color: #555;
+            font-size: 15px;
+        }
+
+        /* Research Areas */
+        .research {
+            background: #f0f4f8;
+            max-width: 100%;
+            padding: 70px 30px;
+        }
+
+        .research-inner {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .research-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 25px;
+        }
+
+        .research-item {
+            background: white;
+            border-radius: 10px;
+            padding: 30px 25px;
+            border-left: 4px solid #004a99;
+            transition: transform 0.3s;
+        }
+
+        .research-item:hover {
+            transform: translateX(5px);
+        }
+
+        .research-item h3 {
+            color: #003366;
+            margin-bottom: 10px;
+            font-size: 18px;
+        }
+
+        .research-item p {
+            color: #555;
+            font-size: 14px;
+        }
+
+        /* Stats */
+        .stats {
+            background: linear-gradient(135deg, #003366 0%, #004a99 100%);
+            color: white;
+            max-width: 100%;
+            padding: 60px 30px;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 30px;
+            max-width: 1200px;
+            margin: 0 auto;
+            text-align: center;
+        }
+
+        .stat-item h3 {
+            font-size: 48px;
+            font-weight: 700;
+            margin-bottom: 5px;
+        }
+
+        .stat-item p {
+            font-size: 15px;
+            opacity: 0.9;
+        }
+
+        /* Footer */
+        footer {
+            background: #001a33;
+            color: white;
+            padding: 50px 30px 30px;
+        }
+
+        .footer-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 40px;
+            max-width: 1200px;
+            margin: 0 auto 40px;
+        }
+
+        .footer-col h4 {
+            font-size: 16px;
+            margin-bottom: 15px;
+            color: #00a86b;
+        }
+
+        .footer-col p,
+        .footer-col a {
+            color: #aaa;
+            font-size: 14px;
+            text-decoration: none;
+            line-height: 2;
+        }
+
+        .footer-col a:hover {
+            color: white;
+        }
+
+        .footer-bottom {
+            text-align: center;
+            padding-top: 30px;
+            border-top: 1px solid #003366;
+            color: #666;
+            font-size: 13px;
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Header -->
+    <header>
+        <div class="header-top">
+            <div class="logo">
+                <div class="logo-icon">LNCC</div>
+                <div class="logo-text">
+                    <h1>LNCC</h1>
+                    <span>Laboratório Nacional de Computação Científica</span>
+                </div>
+            </div>
+            <nav>
+                <ul>
+                    <li><a href="#sobre">Sobre</a></li>
+                    <li><a href="#pesquisa">Pesquisa</a></li>
+                    <li><a href="#areas">Áreas</a></li>
+                    <li><a href="#contato">Contato</a></li>
+                </ul>
+            </nav>
+        </div>
+    </header>
+
+    <!-- Hero -->
+    <div class="hero">
+        <h2>Computação Científica de <strong>Excelência</strong></h2>
+        <p>Promovendo pesquisa e desenvolvimento em computação de alto desempenho, inteligência artificial e ciências da computação para solucionar desafios reais.</p>
+        <a href="#sobre" class="hero-btn">Conheça o LNCC</a>
+    </div>
+
+    <!-- About -->
+    <section id="sobre">
+        <h2>Sobre o LNCC</h2>
+        <p class="subtitle">Uma instituição referência em computação científica na América Latina</p>
+        <div class="about-grid">
+            <div class="about-card">
+                <div class="icon">🔬</div>
+                <h3>Pesquisa de Ponta</h3>
+                <p>Desenvolvemos pesquisas inovadoras em computação de alto desempenho, simulações numéricas e inteligência artificial aplicada a problemas científicos.</p>
+            </div>
+            <div class="about-card">
+                <div class="icon">🖥️</div>
+                <h3>Infraestrutura</h3>
+                <p>Disponibilizamos supercomputadores de última geração e recursos computacionais de grande porte para a comunidade científica nacional e internacional.</p>
+            </div>
+            <div class="about-card">
+                <div class="icon">🤝</div>
+                <h3>Colaboração</h3>
+                <p>Parcerias com universidades, centros de pesquisa e indústrias para transformar conhecimento em soluções que impactam a sociedade.</p>
+            </div>
+            <div class="about-card">
+                <div class="icon">🩸</div>
+                <h3>Hemolab</h3>
+                <p>Plataforma integrada para gestão e análise de dados hematológicos, com processamento em tempo real e relatórios automatizados para apoio diagnóstico.</p>
+            </div>
+            <div class="about-card">
+                <div class="icon">🦅</div>
+                <h3>IA Carcará</h3>
+                <p>Inteligência Artificial desenvolvida pelo LNCC para processamento de linguagem natural, análise de documentos científicos e apoio à pesquisa com compreensão avançada do português brasileiro.</p>
+            </div>
+        </div>
+    </section>
+
+    <!-- Stats -->
+    <div class="stats">
+        <div class="stats-grid">
+            <div class="stat-item">
+                <h3>30+</h3>
+                <p>Anos de História</p>
+            </div>
+            <div class="stat-item">
+                <h3>200+</h3>
+                <p>Pesquisadores</p>
+            </div>
+            <div class="stat-item">
+                <h3>500+</h3>
+                <p>Publicações Anuais</p>
+            </div>
+            <div class="stat-item">
+                <h3>100+</h3>
+                <p>Projetos Ativos</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Research Areas -->
+    <div class="research" id="pesquisa">
+        <div class="research-inner">
+            <h2>Áreas de Pesquisa</h2>
+            <p class="subtitle">Atuação em diversas frentes da computação científica</p>
+            <div class="research-grid" id="areas">
+                <div class="research-item">
+                    <h3>Computação de Alto Desempenho</h3>
+                    <p>Otimização de aplicações paralelas, computação em nuvem e gestão de recursos em grandes clusters.</p>
+                </div>
+                <div class="research-item">
+                    <h3>Inteligência Artificial</h3>
+                    <p>Machine learning, deep learning e IA aplicada às ciências naturais e engenharia.</p>
+                </div>
+                <div class="research-item">
+                    <h3>Simulações Numéricas</h3>
+                    <p>Modelagem computacional de fenômenos físicos, climáticos, biológicos e industriais.</p>
+                </div>
+                <div class="research-item">
+                    <h3>Visão Computacional</h3>
+                    <p>Processamento de imagens, reconhecimento de padrões e análise visual automatizada.</p>
+                </div>
+                <div class="research-item">
+                    <h3>Biologia Computacional</h3>
+                    <p>Modelagem de sistemas biológicos, genômica computacional e descoberta de fármacos.</p>
+                </div>
+                <div class="research-item">
+                    <h3>Ciência de Dados</h3>
+                    <p>Análise estatística avançada, mineração de dados e visualização científica.</p>
+                </div>
+                <div class="research-item">
+                    <h3>Energia e Meio Ambiente</h3>
+                    <p>Simulações climáticas, previsão do tempo e modelagem de recursos energéticos.</p>
+                </div>
+                <div class="research-item">
+                    <h3>Segurança da Informação</h3>
+                    <p>Criptografia, segurança de sistemas e proteção de dados em ambientes científicos.</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Footer -->
+    <footer id="contato">
+        <div class="footer-grid">
+            <div class="footer-col">
+                <h4>LNCC</h4>
+                <p>Laboratório Nacional de Computação Científica</p>
+                <p>Promovendo a excelência em computação científica desde 1991.</p>
+            </div>
+            <div class="footer-col">
+                <h4>Contato</h4>
+                <p>📍 Av. Getúlio Vargas, 333 – Santos Dumont, RJ</p>
+                <p>📞 (24) 3351-6000</p>
+                <p>✉️ contato@lncc.br</p>
+            </div>
+            <div class="footer-col">
+                <h4>Links Úteis</h4>
+                <p><a href="https://www.lncc.br" target="_blank">Site Oficial</a></p>
+                <p><a href="https://www.lncc.br" target="_blank">Publicações</a></p>
+                <p><a href="https://www.lncc.br" target="_blank">Vagas</a></p>
+                <p><a href="https://www.lncc.br" target="_blank">Eventos</a></p>
+            </div>
+        </div>
+        <div class="footer-bottom">
+            <p>&copy; 2024 LNCC - Laboratório Nacional de Computação Científica. Todos os direitos reservados.</p>
+        </div>
+    </footer>
+
+</body>
+</html>

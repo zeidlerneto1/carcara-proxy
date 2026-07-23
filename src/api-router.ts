@@ -69,7 +69,7 @@ export class CarcaraRouter {
       }
     });
 
-    // ⭐ /v1/chat/completions - CORRIGIDO (proteção contra selected vazio)
+    // ⭐ /v1/chat/completions - ATUALIZADO (32K contexto)
     this.app.post('/v1/chat/completions', async (req: Request, res: Response) => {
       try {
         const { model, messages, stream, tools } = req.body;
@@ -79,73 +79,71 @@ export class CarcaraRouter {
           return res.status(400).json({ error: 'Messages are required' });
         }
 
-        // CORREÇÃO 1: ID gerado via timestamp pode colidir ou falhar em parsers rigorosos. Adicionado sufixo aleatório.
-        const completionId = `chatcmpl-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+        const completionId = `chatcmpl-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`;
         const created = Math.floor(Date.now() / 1000);
-        const modelName = model || 'Qwen3.6-35B';
+        const modelName = model || this.client.getDefaultModel();
 
+        // ==========================================
+        // LIMITES PARA 32K CONTEXTO
+        // ==========================================
+        const MAX_PROMPT = 25000;
+        const MAX_MSG_CHARS = 4000;
+        const MAX_TOOL_CHARS = 8000;
+        const MAX_HISTORY = 10;
+
+        // System prompt sempre completo
+        const systemMsg = msgs.find(m => m.role === 'system');
+        const recentMsgs = msgs.slice(-MAX_HISTORY);
+        
         const promptParts: string[] = [];
         let totalChars = 0;
-        const MAX_PROMPT = 8000;
 
-        const reversed = [...msgs].reverse();
-        const selected: ChatMessage[] = [];
-
-        for (const m of reversed) {
-          const text = this.extractText(m.content);
-          const msgSize = text.length + 50;
-
-          if (m.role === 'system' || m.role === 'tool') {
-            if (totalChars + msgSize > MAX_PROMPT && selected.length > 0) break;
-            selected.unshift(m);
-            totalChars += msgSize;
-            continue;
-          }
-
-          const limitedText = text.substring(0, 2000);
-          if (totalChars + limitedText.length > MAX_PROMPT && selected.length > 0) break;
-          
-          selected.unshift({ ...m, content: limitedText });
-          totalChars += limitedText.length;
+        if (systemMsg && !recentMsgs.includes(systemMsg)) {
+          const sysText = this.extractText(systemMsg.content);
+          promptParts.push(`<|im_start|>system\n${sysText}<|im_end|>\n`);
+          totalChars += sysText.length;
         }
 
-        if (selected.length === 0 && msgs.length > 0) {
-          const last = msgs[msgs.length - 1];
-          selected.push(last);
-        }
+        for (const m of recentMsgs) {
+          let text = this.extractText(m.content);
+          if (!text && !m.tool_calls?.length) continue;
 
-        // Constrói prompt usando delimitadores ChatML explícitos para o Qwen não alucinar nos turnos
-        for (const m of selected) {
-          const text = this.extractText(m.content);
-          if (!text && !m.tool_calls) continue;
+          const isLast = m === recentMsgs[recentMsgs.length - 1];
 
           switch (m.role) {
             case 'system':
               promptParts.push(`<|im_start|>system\n${text}<|im_end|>\n`);
               break;
             case 'user':
+              if (!isLast && text.length > MAX_MSG_CHARS) {
+                text = text.substring(0, MAX_MSG_CHARS);
+              }
               promptParts.push(`<|im_start|>user\n${text}<|im_end|>\n`);
               break;
             case 'assistant':
+              if (!isLast && text.length > MAX_MSG_CHARS) {
+                text = text.substring(0, MAX_MSG_CHARS);
+              }
               promptParts.push(`<|im_start|>assistant\n${text}`);
               if (m.tool_calls?.length) {
-                promptParts.push(`\n[CALL_TOOLS]: ${JSON.stringify(m.tool_calls)}`);
+                promptParts.push(JSON.stringify(m.tool_calls));
               }
               promptParts.push(`<|im_end|>\n`);
               break;
             case 'tool':
+              if (!isLast && text.length > MAX_TOOL_CHARS) {
+                text = text.substring(0, MAX_TOOL_CHARS);
+              }
               promptParts.push(`<|im_start|>tool\n${text}<|im_end|>\n`);
               break;
           }
         }
 
-        // Abre o turno do assistente para forçar o modelo a responder e não repetir prompts antigos
         promptParts.push(`<|im_start|>assistant\n`);
-        const prompt = promptParts.join('\n');
+        const prompt = promptParts.join('');
 
-        const lastMsg = selected[selected.length - 1];
-        const lastText = lastMsg ? this.extractText(lastMsg.content) : '...';
-        console.log(`💬 Prompt: ${prompt.length} chars | ${lastText.substring(0, 80)}`);
+        const lastMsg = recentMsgs[recentMsgs.length - 1];
+        console.log(`💬 Prompt: ${prompt.length} chars | ${this.extractText(lastMsg.content).substring(0, 80)}`);
 
         const response = await this.client.chatCompletion(prompt, model, tools);
         const content = response?.choices?.[0]?.message?.content || '';
@@ -153,7 +151,7 @@ export class CarcaraRouter {
 
         console.log(`🤖 Response: ${content.length} chars | ${content.substring(0, 80)}`);
 
-        // STREAMING SSE CORRIGIDO E PROTEGIDO CONTRA QUEBRA DE STRINGS
+        // STREAMING SSE
         if (stream) {
           res.setHeader('Content-Type', 'text/event-stream');
           res.setHeader('Cache-Control', 'no-cache');
@@ -161,7 +159,6 @@ export class CarcaraRouter {
           res.setHeader('X-Accel-Buffering', 'no');
           res.flushHeaders();
 
-          // Se o cluster respondeu uma chamada de ferramenta nativa, despacha ela inteira e intacta de uma vez só
           if (toolCalls?.length) {
             res.write(`data: ${JSON.stringify({
               id: completionId, object: 'chat.completion.chunk', created, model: modelName,
@@ -175,22 +172,15 @@ export class CarcaraRouter {
             return res.end();
           }
 
-          // CORREÇÃO 2: Se o conteúdo for código ou contiver marcadores estruturados, dividimos por quebra de linha (\n)
-          // Fatiar por espaços corta caracteres de escape (\") no meio, corrompendo o JSON e dando "Unterminated String"
-          if (content) {
-            const lines = content.split(/(\n+)/);
-            for (let i = 0; i < lines.length; i++) {
-              if (!lines[i]) continue;
-              res.write(`data: ${JSON.stringify({
-                id: completionId, object: 'chat.completion.chunk', created, model: modelName,
-                choices: [{ index: 0, delta: i === 0 ? { role: 'assistant', content: lines[i] } : { content: lines[i] }, finish_reason: null }],
-              })}\n\n`);
-              // Pequena pausa apenas para manter a cadência fluida exigida por clientes SSE
-              await new Promise(resolve => setTimeout(resolve, 2));
-            }
+          const lines = content.split(/(\n+)/);
+          for (let i = 0; i < lines.length; i++) {
+            if (!lines[i]) continue;
+            res.write(`data: ${JSON.stringify({
+              id: completionId, object: 'chat.completion.chunk', created, model: modelName,
+              choices: [{ index: 0, delta: i === 0 ? { role: 'assistant', content: lines[i] } : { content: lines[i] }, finish_reason: null }],
+            })}\n\n`);
           }
 
-          // Chunk finalizador obrigatório do protocolo OpenAI
           res.write(`data: ${JSON.stringify({
             id: completionId, object: 'chat.completion.chunk', created, model: modelName,
             choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
@@ -199,8 +189,8 @@ export class CarcaraRouter {
           return res.end();
         }
 
-        // Resposta síncrona estável (Fallback)
-        return res.json({
+        // Não-streaming
+        res.json({
           id: completionId, object: 'chat.completion', created, model: modelName,
           choices: [{
             index: 0,
@@ -211,10 +201,8 @@ export class CarcaraRouter {
         });
 
       } catch (error: any) {
-        console.error('❌ Erro no endpoint completions:', error.message);
-        if (!res.headersSent) {
-          res.status(500).json({ error: { message: error.message, type: 'api_error' } });
-        }
+        console.error('❌', error.message);
+        res.status(500).json({ error: { message: error.message, type: 'api_error' } });
       }
     });
 
@@ -363,7 +351,41 @@ export class CarcaraRouter {
 
     return new Promise<void>((resolve) => {
       this.app.listen(this.port, () => {
-        console.log(`\n🦙 Carcara AI Gateway\n🌐 http://localhost:${this.port}\n`);
+        console.log(`\n🦙 Carcara AI Gateway`);
+        console.log(`🌐 http://localhost:${this.port}`);
+        console.log('═══════════════════════════════════════');
+        console.log('📋 OpenAI Compatible:');
+        console.log(`   GET  /v1/models              → Listar modelos`);
+        console.log(`   POST /v1/chat/completions    → Chat (stream/não-stream)`);
+        console.log(`   POST /v1/embeddings          → Embeddings`);
+        console.log('');
+        console.log('📋 Ollama Compatible:');
+        console.log(`   GET  /api/health             → Health check`);
+        console.log(`   GET  /api/tags               → Listar modelos`);
+        console.log(`   POST /api/show               → Info do modelo`);
+        console.log(`   POST /api/generate           → Gerar texto`);
+        console.log(`   POST /api/chat               → Chat`);
+        console.log(`   POST /api/embed              → Embeddings`);
+        console.log('');
+        console.log('📋 MCP Tools:');
+        console.log(`   GET  /mcp/list               → Listar ferramentas`);
+        console.log(`   POST /mcp/call               → Chamar ferramenta`);
+        console.log('');
+        console.log('📋 Search:');
+        console.log(`   POST /api/search             → Busca multi-provider`);
+        console.log(`   POST /api/search/ddg         → DuckDuckGo`);
+        console.log(`   POST /api/search/wiki        → Wikipedia`);
+        console.log('');
+        console.log('📋 Debug:');
+        console.log(`   GET  /ping                   → Ping`);
+        console.log(`   GET  /api/conversations      → Listar conversas`);
+        console.log(`   GET  /api/conversations/:id   → Mensagens`);
+        console.log(`   GET  /api/debug/conversations → Debug detalhado`);
+        console.log(`   GET  /api/tools              → Ferramentas Carcara`);
+        console.log(`   POST /api/tools/:server/:mtd → Chamar tool`);
+        console.log('═══════════════════════════════════════');
+        console.log(`📁 Sessão: .carcara/session.json`);
+        console.log('═══════════════════════════════════════\n');
         resolve();
       });
     });

@@ -1,4 +1,3 @@
-// src/carcara-client.ts - VERSÃO CORRIGIDA E FUNCIONAL
 /// <reference lib="dom" />
 
 import { chromium, Browser, BrowserContext, Page } from 'playwright';
@@ -23,7 +22,7 @@ import {
 dotenv.config();
 
 // ============================================================================
-// CONSTANTES (Definidas como variáveis normais, não como objeto)
+// CONSTANTES
 // ============================================================================
 
 const CARCARA_BASE_URL = process.env.CARCARA_URL || 'https://carcara.sinapad.lncc.br';
@@ -39,10 +38,11 @@ const DB_STORE_CONVERSATIONS = 'conversations';
 const DB_STORE_MESSAGES = 'messages';
 
 const DEFAULT_DOMAIN = 'LNCC';
-const DEFAULT_MODEL = 'meta-llama/llama-3.1-70b-instruct';
+const DEFAULT_MODEL = 'Qwen3.6-35B';
 const DEFAULT_TITLE = 'Nova Conversa LNCC';
-const DEFAULT_TEMPERATURE = 0.7;
-const DEFAULT_MAX_TOKENS = 1024;
+const DEFAULT_TEMPERATURE = 0.5;
+const DEFAULT_MAX_TOKENS = 4096;
+const MAX_CONTEXT_TOKENS = 32768;
 
 const ENV_USER = 'LNCC_USER';
 const ENV_PASS = 'LNCC_PASS';
@@ -51,12 +51,12 @@ const TIMEOUT_NAVIGATION = 30000;
 const TIMEOUT_ELEMENT = 10000;
 const TIMEOUT_API = 15000;
 const TIMEOUT_RETRY = 1000;
-const TIMEOUT_CHAT = 60000;
+const TIMEOUT_CHAT = 100000;
 const TIMEOUT_SESSION_EXPIRY = 24 * 60 * 60 * 1000;
-const MAX_RETRIES = 2;
+const MAX_RETRIES = 3;
 
 // ============================================================================
-// CLASSE DE RECORDER
+// CLASSE DE RECORDER (mantida igual)
 // ============================================================================
 
 class LoginRecorder {
@@ -146,19 +146,16 @@ class LoginRecorder {
         fs.readFileSync(this.sessionPath, 'utf-8')
       );
 
-      // Verificar expiração
       if (Date.now() - session.timestamp > TIMEOUT_SESSION_EXPIRY) {
         this.log('⚠️ Sessão expirada (>24h)');
         return null;
       }
 
-      // Restaurar cookies
       if (session.cookies && session.cookies.length > 0) {
         await page.context().addCookies(session.cookies as any);
         this.log('🍪 Cookies restaurados');
       }
 
-      // Navegar para a página de serviço (importante para setar tokens)
       const serviceUrl = `${CARCARA_BASE_URL}${SERVICE_PATH}/`;
       if (session.token) {
         await page.goto(`${serviceUrl}?token=${session.token}`, {
@@ -181,10 +178,7 @@ class LoginRecorder {
   }
 
   saveModelsCache(models: ModelInfo[]): void {
-    const cache = {
-      timestamp: Date.now(),
-      models,
-    };
+    const cache = { timestamp: Date.now(), models };
     fs.writeFileSync(this.modelsPath, JSON.stringify(cache, null, 2), 'utf-8');
     this.log(`💾 Cache de ${models.length} modelos salvo`);
   }
@@ -205,7 +199,6 @@ class LoginRecorder {
   log(message: string): void {
     const timestamp = new Date().toISOString();
     const logMessage = `[${timestamp}] ${message}\n`;
-    
     console.log(`  ${message}`);
     fs.appendFileSync(this.logPath, logMessage, 'utf-8');
   }
@@ -262,7 +255,7 @@ export class CarcaraClient {
   }
 
   // ==========================================================================
-  // INICIALIZAÇÃO PRINCIPAL
+  // INICIALIZAÇÃO
   // ==========================================================================
 
   async init(): Promise<void> {
@@ -278,10 +271,7 @@ export class CarcaraClient {
     try {
       await this.launchBrowser();
       await this.handleAuthentication();
-      
-      // IMPORTANTE: Navegar para /service/ para setar cookies corretos
       await this.navigateToService();
-      
       await this.fetchModels();
       
       this.isInitialized = true;
@@ -298,52 +288,38 @@ export class CarcaraClient {
   }
 
   // ==========================================================================
-  // GERENCIAMENTO DO NAVEGADOR
+  // NAVEGADOR
   // ==========================================================================
 
-    private async launchBrowser(): Promise<void> {
+  private async launchBrowser(): Promise<void> {
     console.log('🌐 Iniciando navegador em modo silencioso...');
     
     this.browser = await chromium.launch({ 
-        headless: true, // MUDAR PARA TRUE - modo silencioso
-        args: [
+      headless: true,
+      args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
         '--disable-gpu',
-        '--disable-extensions',
-        '--disable-background-networking',
-        '--disable-sync',
-        '--no-first-run',
-        '--disable-default-apps',
-        '--hide-scrollbars',
-        '--metrics-recording-only',
-        '--mute-audio',
-        '--no-zygote',
-        ],
+      ],
     });
     
     this.context = await this.browser.newContext({
-        viewport: { width: 1280, height: 720 },
-        userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
+      viewport: { width: 1280, height: 720 },
+      userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
     });
     
     this.page = await this.context.newPage();
     this.page.setDefaultTimeout(TIMEOUT_NAVIGATION);
     
     console.log('✅ Navegador iniciado em background');
-    }
-
-  // ==========================================================================
-  // NAVEGAÇÃO PARA /SERVICE/ (IMPORTANTE PARA SETAR COOKIES)
-  // ==========================================================================
+  }
 
   private async navigateToService(): Promise<void> {
     console.log('🔗 Navegando para /service/ para inicializar sessão...');
     
     const serviceUrl = `${this.config.baseUrl}${SERVICE_PATH}/`;
     
-    // Se tem token, usar ele
     if (this.authToken) {
       await this.page!.goto(`${serviceUrl}?token=${this.authToken}`, {
         waitUntil: 'networkidle',
@@ -358,33 +334,27 @@ export class CarcaraClient {
 
     await this.page!.waitForTimeout(3000);
 
-    // Atualizar cookies após navegar para /service/
     const cookies = await this.context!.cookies([this.config.baseUrl]);
     const carcareAuthCookie = cookies.find(c => c.name === 'carcara_auth');
     
     if (carcareAuthCookie) {
       this.carcareAuth = carcareAuthCookie.value;
       console.log(`🔑 carcara_auth: ${this.carcareAuth.substring(0, 15)}...`);
-    } else {
-      console.log('⚠️ Cookie carcara_auth não encontrado após navegar para /service/');
     }
 
-    // Atualizar PHPSESSID
     const phpsessidCookie = cookies.find(c => c.name === 'PHPSESSID');
     if (phpsessidCookie) {
       this.phpsessid = phpsessidCookie.value;
     }
 
-    // Salvar sessão atualizada
     await this.recorder.saveSession(this.page!, this.authToken || undefined);
   }
 
   // ==========================================================================
-  // AUTENTICAÇÃO VIA API DIRETA
+  // AUTENTICAÇÃO (mantida igual)
   // ==========================================================================
 
   private async handleAuthentication(): Promise<void> {
-    // 1. Tentar restaurar sessão
     console.log('🔍 Verificando sessão salva...');
     const restoredSession = await this.recorder.restoreSession(this.page!);
     
@@ -393,7 +363,6 @@ export class CarcaraClient {
       this.authToken = restoredSession.token || null;
       this.carcareAuth = (restoredSession as any).carcaraAuth || null;
       
-      // Verificar se está logado
       const currentUrl = this.page!.url();
       if (!currentUrl.includes('/login')) {
         console.log('✅ Sessão restaurada com sucesso!');
@@ -403,7 +372,6 @@ export class CarcaraClient {
       console.log('⚠️ Sessão expirada, precisa fazer login novamente');
     }
 
-    // 2. Login via API direta
     const envConfig = this.getEnvConfig();
     
     if (envConfig) {
@@ -418,7 +386,6 @@ export class CarcaraClient {
       console.log('⚠️ Login via API falhou, tentando via navegador...');
     }
 
-    // 3. Login via navegador (fallback)
     await this.browserLogin(envConfig);
   }
 
@@ -426,7 +393,6 @@ export class CarcaraClient {
     try {
       console.log('📡 Enviando requisição de login via API...');
       
-      // Navegar para página principal para obter PHPSESSID
       await this.page!.goto(this.config.baseUrl, { 
         waitUntil: 'networkidle',
         timeout: TIMEOUT_NAVIGATION,
@@ -434,7 +400,6 @@ export class CarcaraClient {
       
       await this.page!.waitForTimeout(2000);
       
-      // Extrair PHPSESSID
       const cookies = await this.context!.cookies([this.config.baseUrl]);
       const phpsessid = cookies.find(c => c.name === 'PHPSESSID')?.value;
       
@@ -443,7 +408,6 @@ export class CarcaraClient {
         console.log(`🔑 PHPSESSID: ${phpsessid.substring(0, 10)}...`);
       }
 
-      // Requisição de login
       const payload: LoginPayload = {
         action: 'login',
         user: username,
@@ -451,7 +415,6 @@ export class CarcaraClient {
         domain: this.config.domain,
       };
 
-      // Usar o axios da página para manter os cookies
       const response = await this.axiosInstance.post(
         LOGIN_API,
         payload,
@@ -466,17 +429,12 @@ export class CarcaraClient {
       );
 
       console.log(`📥 Resposta: Status ${response.status}`);
-      console.log(`   Data: ${JSON.stringify(response.data)}`);
 
       if (response.status === 200 && response.data?.status === 'OK') {
-        // Aguardar um momento para os cookies serem setados
         await this.page!.waitForTimeout(2000);
-        
-        // Recarregar a página para obter cookies atualizados
         await this.page!.reload({ waitUntil: 'networkidle' });
         await this.page!.waitForTimeout(2000);
         
-        // Verificar cookies após login
         const updatedCookies = await this.context!.cookies([this.config.baseUrl]);
         const carcareAuthCookie = updatedCookies.find(c => c.name === 'carcara_auth');
         
@@ -485,14 +443,10 @@ export class CarcaraClient {
           console.log(`🔑 carcara_auth: ${this.carcareAuth.substring(0, 15)}...`);
         }
         
-        // Extrair token da URL se disponível
         const currentUrl = this.page!.url();
         try {
           const urlObj = new URL(currentUrl);
           this.authToken = urlObj.searchParams.get('token') || null;
-          if (this.authToken) {
-            console.log(`🔑 Token: ${this.authToken.substring(0, 15)}...`);
-          }
         } catch {}
 
         await this.recorder.saveSession(this.page!, this.authToken || undefined);
@@ -500,16 +454,11 @@ export class CarcaraClient {
       }
 
       return false;
-
     } catch (error: any) {
       console.error('❌ Erro na API de login:', error.message);
       return false;
     }
   }
-
-  // ==========================================================================
-  // LOGIN VIA NAVEGADOR (FALLBACK)
-  // ==========================================================================
 
   private async browserLogin(envConfig?: { username: string; password: string } | null): Promise<void> {
     if (envConfig) {
@@ -518,17 +467,14 @@ export class CarcaraClient {
       const loginUrl = `${this.config.baseUrl}${LOGIN_PAGE}`;
       await this.page!.goto(loginUrl, { waitUntil: 'networkidle' });
       
-      // Preencher credenciais
       await this.fillField(
         ['input[name="user"]', 'input[type="text"]', 'input[type="email"]'],
-        envConfig.username,
-        'usuário'
+        envConfig.username, 'usuário'
       );
       
       await this.fillField(
         ['input[type="password"]', 'input[name="password"]'],
-        envConfig.password,
-        'senha'
+        envConfig.password, 'senha'
       );
 
       await this.clickSubmit();
@@ -540,11 +486,7 @@ export class CarcaraClient {
       }
     }
 
-    // Login manual
     console.log('\n👤 LOGIN MANUAL NECESSÁRIO');
-    console.log('═══════════════════════════════');
-    console.log('   O navegador abrirá para login');
-    console.log('   Após logar, aguarde o programa continuar');
     console.log('═══════════════════════════════\n');
 
     if (!this.isOnLoginPage()) {
@@ -553,7 +495,6 @@ export class CarcaraClient {
       });
     }
 
-    // Aguardar sair da página de login (timeout infinito)
     await this.page!.waitForURL(
       (url) => !url.toString().includes('/login'),
       { timeout: 0 }
@@ -565,13 +506,12 @@ export class CarcaraClient {
   }
 
   // ==========================================================================
-  // BUSCAR MODELOS
+  // MODELOS
   // ==========================================================================
 
   private async fetchModels(): Promise<void> {
     console.log('📋 Buscando modelos disponíveis...');
 
-    // Tentar cache primeiro
     const cachedModels = this.recorder.loadModelsCache();
     if (cachedModels && cachedModels.length > 0) {
       this.availableModels = cachedModels;
@@ -580,11 +520,8 @@ export class CarcaraClient {
     }
 
     try {
-      // Usar os cookies da sessão atual
       const cookies = await this.context!.cookies([this.config.baseUrl]);
       const cookieString = cookies.map(c => `${c.name}=${c.value}`).join('; ');
-
-      console.log(`🍪 Cookies: ${cookieString.substring(0, 100)}...`);
 
       const modelsAxios = axios.create({
         baseURL: this.config.apiBaseUrl,
@@ -604,44 +541,15 @@ export class CarcaraClient {
         { timeout: TIMEOUT_API }
       );
 
-      console.log(`📥 Models Response: Status ${response.status}`);
-
       if (response.status === 200 && response.data?.data) {
         this.availableModels = response.data.data;
         this.recorder.saveModelsCache(this.availableModels);
         console.log(`✅ ${this.availableModels.length} modelos disponíveis`);
         this.displayModels();
-      } else if (response.status === 403) {
-        console.log('⚠️ Acesso negado (403) - verificando cookies...');
-        
-        // Tentar novamente após recarregar a página
-        await this.page!.reload({ waitUntil: 'networkidle' });
-        await this.page!.waitForTimeout(2000);
-        
-        const newCookies = await this.context!.cookies([this.config.baseUrl]);
-        const newCookieString = newCookies.map(c => `${c.name}=${c.value}`).join('; ');
-        
-        console.log(`🍪 Novos cookies: ${newCookieString.substring(0, 100)}...`);
-        
-        const retryResponse = await modelsAxios.get<ModelsResponse>(
-          MODELS_API,
-          { 
-            headers: { 'Cookie': newCookieString },
-            timeout: TIMEOUT_API,
-          }
-        );
-        
-        if (retryResponse.status === 200 && retryResponse.data?.data) {
-          this.availableModels = retryResponse.data.data;
-          this.recorder.saveModelsCache(this.availableModels);
-          console.log(`✅ ${this.availableModels.length} modelos disponíveis (2ª tentativa)`);
-          this.displayModels();
-        }
       }
     } catch (error: any) {
       console.warn('⚠️ Não foi possível buscar modelos:', error.message);
       
-      // Usar cache expirado se disponível
       try {
         const cachePath = this.recorder.modelsPath;
         if (fs.existsSync(cachePath)) {
@@ -658,19 +566,24 @@ export class CarcaraClient {
     
     console.log('\n📋 Modelos disponíveis:');
     this.availableModels.slice(0, 10).forEach(model => {
-      console.log(`   - ${model.id}`);
+      console.log(`   - ${model.id} (${(model as any).max_input_tokens || '?'} tokens)`);
     });
-    if (this.availableModels.length > 10) {
-      console.log(`   ... e mais ${this.availableModels.length - 10}`);
-    }
   }
 
   async getAvailableModels(): Promise<ModelInfo[]> {
     return this.availableModels;
   }
 
+  /** Retorna o primeiro modelo disponível */
+  getDefaultModel(): string {
+    if (this.availableModels.length > 0) {
+      return this.availableModels[0].id;
+    }
+    return DEFAULT_MODEL;
+  }
+
   // ==========================================================================
-  // MÉTODOS AUXILIARES
+  // AUXILIARES
   // ==========================================================================
 
   private async fillField(selectors: string[], value: string, fieldName: string): Promise<boolean> {
@@ -682,7 +595,6 @@ export class CarcaraClient {
         return true;
       }
     }
-    console.log(`   ✗ Campo ${fieldName} não encontrado`);
     return false;
   }
 
@@ -707,7 +619,6 @@ export class CarcaraClient {
   private getEnvConfig(): { username: string; password: string } | null {
     const username = process.env[ENV_USER];
     const password = process.env[ENV_PASS];
-    
     if (!username || !password) return null;
     return { username, password };
   }
@@ -734,9 +645,7 @@ export class CarcaraClient {
     const envPath = path.join(process.cwd(), '.env');
     let content = '';
 
-    try {
-      content = fs.readFileSync(envPath, 'utf-8');
-    } catch {}
+    try { content = fs.readFileSync(envPath, 'utf-8'); } catch {}
 
     const updates: Record<string, string> = {
       [ENV_USER]: username,
@@ -763,8 +672,7 @@ export class CarcaraClient {
 
   private isOnLoginPage(): boolean {
     if (!this.page) return true;
-    const url = this.page.url();
-    return url.includes('/login');
+    return this.page.url().includes('/login');
   }
 
   private getCookieString(): Promise<string> {
@@ -774,35 +682,64 @@ export class CarcaraClient {
   }
 
   // ==========================================================================
-// MÉTODOS INDEXEDDB (CORRIGIDO - apenas 1 argumento)
-// ==========================================================================
+  // INDEXEDDB (mantido igual)
+  // ==========================================================================
 
-private async executeInBrowser<T>(fn: string, arg?: any): Promise<T> {
-  if (!this.page || this.page.isClosed()) {
-    throw new Error('Página não disponível');
+  private async executeInBrowser<T>(fn: string, arg?: any): Promise<T> {
+    if (!this.page || this.page.isClosed()) {
+      throw new Error('Página não disponível');
+    }
+
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        return await this.page.evaluate(fn, arg);
+      } catch (error: any) {
+        if (error.message?.includes('Execution context was destroyed') && attempt < MAX_RETRIES) {
+          await this.page.waitForTimeout(TIMEOUT_RETRY);
+          continue;
+        }
+        throw error;
+      }
+    }
+    throw new Error('Falha na execução no browser');
   }
 
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+  async getConversations(): Promise<ConversationNode[]> {
+    this.ensureInitialized();
     try {
-      // Playwright só aceita 1 argumento - passar como objeto
-      return await this.page.evaluate(fn, arg);
-    } catch (error: any) {
-      if (error.message?.includes('Execution context was destroyed') && attempt < MAX_RETRIES) {
-        await this.page.waitForTimeout(TIMEOUT_RETRY);
-        continue;
-      }
-      throw error;
+      const result = await this.executeInBrowser<ConversationNode[]>(`
+        async () => {
+          return new Promise((resolve, reject) => {
+            const request = indexedDB.open('${DB_NAME}');
+            request.onerror = () => reject(request.error);
+            request.onupgradeneeded = () => {
+              const db = request.result;
+              if (!db.objectStoreNames.contains('${DB_STORE_CONVERSATIONS}')) {
+                db.createObjectStore('${DB_STORE_CONVERSATIONS}', { keyPath: 'id' });
+              }
+            };
+            request.onsuccess = () => {
+              const db = request.result;
+              const tx = db.transaction('${DB_STORE_CONVERSATIONS}', 'readonly');
+              const store = tx.objectStore('${DB_STORE_CONVERSATIONS}');
+              const req = store.getAll();
+              req.onsuccess = () => resolve(req.result || []);
+              req.onerror = () => reject(req.error);
+            };
+          });
+        }
+      `);
+      return Array.isArray(result) ? result : [];
+    } catch (error) {
+      console.error('Erro ao buscar conversas:', error);
+      return [];
     }
   }
-  throw new Error('Falha na execução no browser');
-}
 
-async getConversations(): Promise<ConversationNode[]> {
-  this.ensureInitialized();
-  
-  try {
-    const result = await this.executeInBrowser<ConversationNode[]>(`
-      async () => {
+  async saveConversation(conversation: ConversationNode): Promise<void> {
+    this.ensureInitialized();
+    await this.executeInBrowser<void>(`
+      async (conversation) => {
         return new Promise((resolve, reject) => {
           const request = indexedDB.open('${DB_NAME}');
           request.onerror = () => reject(request.error);
@@ -814,113 +751,74 @@ async getConversations(): Promise<ConversationNode[]> {
           };
           request.onsuccess = () => {
             const db = request.result;
-            const tx = db.transaction('${DB_STORE_CONVERSATIONS}', 'readonly');
-            const store = tx.objectStore('${DB_STORE_CONVERSATIONS}');
-            const req = store.getAll();
-            req.onsuccess = () => resolve(req.result || []);
+            const tx = db.transaction('${DB_STORE_CONVERSATIONS}', 'readwrite');
+            tx.objectStore('${DB_STORE_CONVERSATIONS}').put(conversation);
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error);
+          };
+        });
+      }
+    `, conversation);
+  }
+
+  async getConversationMessages(conversationId: string): Promise<LlamaMessage[]> {
+    this.ensureInitialized();
+    return this.executeInBrowser<LlamaMessage[]>(`
+      async (conversationId) => {
+        return new Promise((resolve, reject) => {
+          const request = indexedDB.open('${DB_NAME}');
+          request.onerror = () => reject(request.error);
+          request.onupgradeneeded = () => {
+            const db = request.result;
+            if (!db.objectStoreNames.contains('${DB_STORE_MESSAGES}')) {
+              const store = db.createObjectStore('${DB_STORE_MESSAGES}', { keyPath: 'id' });
+              store.createIndex('conversationId', 'conversationId', { unique: false });
+            }
+          };
+          request.onsuccess = () => {
+            const db = request.result;
+            if (!db.objectStoreNames.contains('${DB_STORE_MESSAGES}')) { resolve([]); return; }
+            const tx = db.transaction('${DB_STORE_MESSAGES}', 'readonly');
+            const index = tx.objectStore('${DB_STORE_MESSAGES}').index('conversationId');
+            const req = index.getAll(conversationId);
+            req.onsuccess = () => {
+              const messages = req.result;
+              messages.sort((a, b) => a.timestamp - b.timestamp);
+              resolve(messages);
+            };
             req.onerror = () => reject(req.error);
           };
         });
       }
-    `);
-    
-    // Garantir que sempre retorna um array
-    return Array.isArray(result) ? result : [];
-  } catch (error) {
-    console.error('Erro ao buscar conversas:', error);
-    return [];
+    `, conversationId);
   }
-}
 
-async saveConversation(conversation: ConversationNode): Promise<void> {
-  this.ensureInitialized();
-  
-  await this.executeInBrowser<void>(`
-    async (conversation) => {
-      return new Promise((resolve, reject) => {
-        const request = indexedDB.open('${DB_NAME}');
-        request.onerror = () => reject(request.error);
-        request.onupgradeneeded = () => {
-          const db = request.result;
-          if (!db.objectStoreNames.contains('${DB_STORE_CONVERSATIONS}')) {
-            db.createObjectStore('${DB_STORE_CONVERSATIONS}', { keyPath: 'id' });
-          }
-        };
-        request.onsuccess = () => {
-          const db = request.result;
-          const tx = db.transaction('${DB_STORE_CONVERSATIONS}', 'readwrite');
-          tx.objectStore('${DB_STORE_CONVERSATIONS}').put(conversation);
-          tx.oncomplete = () => resolve();
-          tx.onerror = () => reject(tx.error);
-        };
-      });
-    }
-  `, conversation);
-}
-
-async getConversationMessages(conversationId: string): Promise<LlamaMessage[]> {
-  this.ensureInitialized();
-  
-  return this.executeInBrowser<LlamaMessage[]>(`
-    async (conversationId) => {
-      return new Promise((resolve, reject) => {
-        const request = indexedDB.open('${DB_NAME}');
-        request.onerror = () => reject(request.error);
-        request.onupgradeneeded = () => {
-          const db = request.result;
-          if (!db.objectStoreNames.contains('${DB_STORE_MESSAGES}')) {
-            const store = db.createObjectStore('${DB_STORE_MESSAGES}', { keyPath: 'id' });
-            store.createIndex('conversationId', 'conversationId', { unique: false });
-          }
-        };
-        request.onsuccess = () => {
-          const db = request.result;
-          if (!db.objectStoreNames.contains('${DB_STORE_MESSAGES}')) {
-            resolve([]);
-            return;
-          }
-          const tx = db.transaction('${DB_STORE_MESSAGES}', 'readonly');
-          const index = tx.objectStore('${DB_STORE_MESSAGES}').index('conversationId');
-          const req = index.getAll(conversationId);
-          req.onsuccess = () => {
-            const messages = req.result;
-            messages.sort((a, b) => a.timestamp - b.timestamp);
-            resolve(messages);
+  async saveMessage(message: LlamaMessage, conversationId: string): Promise<void> {
+    this.ensureInitialized();
+    const messageData = { ...message, conversationId };
+    await this.executeInBrowser<void>(`
+      async (messageData) => {
+        return new Promise((resolve, reject) => {
+          const request = indexedDB.open('${DB_NAME}');
+          request.onerror = () => reject(request.error);
+          request.onupgradeneeded = () => {
+            const db = request.result;
+            if (!db.objectStoreNames.contains('${DB_STORE_MESSAGES}')) {
+              const store = db.createObjectStore('${DB_STORE_MESSAGES}', { keyPath: 'id' });
+              store.createIndex('conversationId', 'conversationId', { unique: false });
+            }
           };
-          req.onerror = () => reject(req.error);
-        };
-      });
-    }
-  `, conversationId);
-}
-
-async saveMessage(message: LlamaMessage, conversationId: string): Promise<void> {
-  this.ensureInitialized();
-  
-  const messageData = { ...message, conversationId };
-  await this.executeInBrowser<void>(`
-    async (messageData) => {
-      return new Promise((resolve, reject) => {
-        const request = indexedDB.open('${DB_NAME}');
-        request.onerror = () => reject(request.error);
-        request.onupgradeneeded = () => {
-          const db = request.result;
-          if (!db.objectStoreNames.contains('${DB_STORE_MESSAGES}')) {
-            const store = db.createObjectStore('${DB_STORE_MESSAGES}', { keyPath: 'id' });
-            store.createIndex('conversationId', 'conversationId', { unique: false });
-          }
-        };
-        request.onsuccess = () => {
-          const db = request.result;
-          const tx = db.transaction('${DB_STORE_MESSAGES}', 'readwrite');
-          tx.objectStore('${DB_STORE_MESSAGES}').put(messageData);
-          tx.oncomplete = () => resolve();
-          tx.onerror = () => reject(tx.error);
-        };
-      });
-    }
-  `, messageData);
-}
+          request.onsuccess = () => {
+            const db = request.result;
+            const tx = db.transaction('${DB_STORE_MESSAGES}', 'readwrite');
+            tx.objectStore('${DB_STORE_MESSAGES}').put(messageData);
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error);
+          };
+        });
+      }
+    `, messageData);
+  }
 
   // ==========================================================================
   // CHAT E MCP
@@ -928,7 +826,7 @@ async saveMessage(message: LlamaMessage, conversationId: string): Promise<void> 
 
   async createNewConversation(
     title: string = DEFAULT_TITLE,
-    model: string = DEFAULT_MODEL
+    model?: string
   ): Promise<string> {
     this.ensureInitialized();
     
@@ -938,7 +836,7 @@ async saveMessage(message: LlamaMessage, conversationId: string): Promise<void> 
       name: title,
       currNode: id,
       lasModified: Date.now(),
-      model,
+      model: model || this.getDefaultModel(),
       system: '',
     };
 
@@ -959,7 +857,7 @@ async saveMessage(message: LlamaMessage, conversationId: string): Promise<void> 
       await this.createNewConversation();
     }
 
-    const modelToUse = model || DEFAULT_MODEL;
+    const modelToUse = model || this.getDefaultModel();
     const cookieString = await this.getCookieString();
 
     const payload: any = {
@@ -967,7 +865,7 @@ async saveMessage(message: LlamaMessage, conversationId: string): Promise<void> 
       messages: [{ role: 'user', content: prompt }],
       stream: false,
       temperature: DEFAULT_TEMPERATURE,
-      max_tokens: DEFAULT_MAX_TOKENS,
+      max_tokens: DEFAULT_MAX_TOKENS, // 4096 - máximo do modelo
     };
 
     if (tools?.length) payload.tools = tools;
@@ -1011,15 +909,11 @@ async saveMessage(message: LlamaMessage, conversationId: string): Promise<void> 
 
   async callMcpTool(serverId: string, method: string, params: any = {}): Promise<any> {
     this.ensureInitialized();
-    
     const cookieString = await this.getCookieString();
 
     const mcpAxios = axios.create({
       baseURL: this.config.apiBaseUrl,
-      headers: {
-        'Cookie': cookieString,
-        'Content-Type': 'application/json',
-      },
+      headers: { 'Cookie': cookieString, 'Content-Type': 'application/json' },
     });
 
     const response = await mcpAxios.post(
@@ -1043,7 +937,7 @@ async saveMessage(message: LlamaMessage, conversationId: string): Promise<void> 
   }
 
   // ==========================================================================
-  // LIMPEZA E VALIDAÇÕES
+  // LIMPEZA
   // ==========================================================================
 
   private async cleanup(): Promise<void> {
