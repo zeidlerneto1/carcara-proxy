@@ -1,6 +1,6 @@
 # Carcara Proxy 🦙
 
-Um **wrapper de API REST compatível com Ollama** para o sistema LNCC Carcara, que fornece acesso a modelos de linguagem (Llama, etc.) hospedados no LNCC através de uma interface OpenRouter-like com suporte a **MCP Tools** e **integração de buscas**.
+Um **wrapper de API REST compatível com Ollama** para o sistema LNCC Carcara, que fornece acesso a modelos de linguagem (Llama, etc.) hospedados no LNCC através de uma interface OpenRouter-like c[...]
 
 ---
 
@@ -603,5 +603,5 @@ MIT
 
 ---
 
-**Última atualização:** 2026-07-20  
-**Versão:** 1.0.0
+**Última atualização:** 2026-07-21  
+**Versão:** 1.0.1
