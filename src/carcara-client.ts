@@ -682,7 +682,7 @@ export class CarcaraClient {
   }
 
   // ==========================================================================
-  // INDEXEDDB (mantido igual)
+  // INDEXEDDB (COMPATÍVEL COM LlamaUI)
   // ==========================================================================
 
   private async executeInBrowser<T>(fn: string, arg?: any): Promise<T> {
@@ -761,10 +761,10 @@ export class CarcaraClient {
     `, conversation);
   }
 
-  async getConversationMessages(conversationId: string): Promise<LlamaMessage[]> {
+  async getConversationMessages(convId: string): Promise<LlamaMessage[]> {
     this.ensureInitialized();
     return this.executeInBrowser<LlamaMessage[]>(`
-      async (conversationId) => {
+      async (convId) => {
         return new Promise((resolve, reject) => {
           const request = indexedDB.open('${DB_NAME}');
           request.onerror = () => reject(request.error);
@@ -772,17 +772,17 @@ export class CarcaraClient {
             const db = request.result;
             if (!db.objectStoreNames.contains('${DB_STORE_MESSAGES}')) {
               const store = db.createObjectStore('${DB_STORE_MESSAGES}', { keyPath: 'id' });
-              store.createIndex('conversationId', 'conversationId', { unique: false });
+              store.createIndex('convId', 'convId', { unique: false });
             }
           };
           request.onsuccess = () => {
             const db = request.result;
             if (!db.objectStoreNames.contains('${DB_STORE_MESSAGES}')) { resolve([]); return; }
             const tx = db.transaction('${DB_STORE_MESSAGES}', 'readonly');
-            const index = tx.objectStore('${DB_STORE_MESSAGES}').index('conversationId');
-            const req = index.getAll(conversationId);
+            const index = tx.objectStore('${DB_STORE_MESSAGES}').index('convId');
+            const req = index.getAll(convId);
             req.onsuccess = () => {
-              const messages = req.result;
+              const messages = req.result || [];
               messages.sort((a, b) => a.timestamp - b.timestamp);
               resolve(messages);
             };
@@ -790,14 +790,13 @@ export class CarcaraClient {
           };
         });
       }
-    `, conversationId);
+    `, convId);
   }
 
-  async saveMessage(message: LlamaMessage, conversationId: string): Promise<void> {
+  async saveMessage(message: LlamaMessage): Promise<void> {
     this.ensureInitialized();
-    const messageData = { ...message, conversationId };
     await this.executeInBrowser<void>(`
-      async (messageData) => {
+      async (msg) => {
         return new Promise((resolve, reject) => {
           const request = indexedDB.open('${DB_NAME}');
           request.onerror = () => reject(request.error);
@@ -805,23 +804,23 @@ export class CarcaraClient {
             const db = request.result;
             if (!db.objectStoreNames.contains('${DB_STORE_MESSAGES}')) {
               const store = db.createObjectStore('${DB_STORE_MESSAGES}', { keyPath: 'id' });
-              store.createIndex('conversationId', 'conversationId', { unique: false });
+              store.createIndex('convId', 'convId', { unique: false });
             }
           };
           request.onsuccess = () => {
             const db = request.result;
             const tx = db.transaction('${DB_STORE_MESSAGES}', 'readwrite');
-            tx.objectStore('${DB_STORE_MESSAGES}').put(messageData);
+            tx.objectStore('${DB_STORE_MESSAGES}').put(msg);
             tx.oncomplete = () => resolve();
             tx.onerror = () => reject(tx.error);
           };
         });
       }
-    `, messageData);
+    `, message);
   }
 
   // ==========================================================================
-  // CHAT E MCP
+  // CHAT E MCP (ATUALIZADO COM ESTRUTURA REAL DO LlamaUI)
   // ==========================================================================
 
   async createNewConversation(
@@ -830,19 +829,31 @@ export class CarcaraClient {
   ): Promise<string> {
     this.ensureInitialized();
     
-    const id = `conv_${Date.now()}_${Math.random().toString(36).substring(2, 11)}`;
+    const id = crypto.randomUUID ? crypto.randomUUID() : `conv_${Date.now()}`;
     const conversation: ConversationNode = {
       id,
       name: title,
       currNode: id,
-      lasModified: Date.now(),
-      model: model || this.getDefaultModel(),
-      system: '',
+      lastModified: Date.now(),
+      mcpServerOverrides: [{ serverId: 'lncc-sdumont', enabled: true }],
+      thinkingEnabled: false,
+    };
+
+    // Cria mensagem system (root) - igual ao LlamaUI
+    const systemMsg: LlamaMessage = {
+      id: crypto.randomUUID ? crypto.randomUUID() : `msg_${Date.now()}`,
+      convId: id,
+      role: 'system',
+      type: 'root',
+      content: '',
+      children: [],
+      timestamp: Date.now(),
     };
 
     await this.saveConversation(conversation);
+    await this.saveMessage(systemMsg);
     this.currentConversationId = id;
-    console.log(`📝 Conversa criada: ${id}`);
+    console.log(`📝 Conversa criada: ${title} [${id}]`);
     return id;
   }
 
@@ -860,27 +871,46 @@ export class CarcaraClient {
     const modelToUse = model || this.getDefaultModel();
     const cookieString = await this.getCookieString();
 
+    // Salva mensagem do usuário no IndexedDB
+    const userMsg: LlamaMessage = {
+      id: crypto.randomUUID ? crypto.randomUUID() : `msg_${Date.now()}`,
+      convId: this.currentConversationId!,
+      role: 'user',
+      type: 'text',
+      content: prompt,
+      children: [],
+      timestamp: Date.now(),
+    };
+    await this.saveMessage(userMsg);
+
+    // Payload igual ao Carcara real
     const payload: any = {
       model: modelToUse,
       messages: [{ role: 'user', content: prompt }],
       stream: false,
       temperature: DEFAULT_TEMPERATURE,
-      max_tokens: DEFAULT_MAX_TOKENS, // 4096 - máximo do modelo
+      max_tokens: DEFAULT_MAX_TOKENS,
+      return_progress: true,
+      reasoning_format: 'auto',
+      chat_template_kwargs: { enable_thinking: false },
+      reasoning_control: true,
+      backend_sampling: false,
+      timings_per_token: false,
     };
 
     if (tools?.length) payload.tools = tools;
 
-    console.log(`💬 Enviando mensagem para ${modelToUse}...`);
+    console.log(`💬 Enviando para ${modelToUse}...`);
 
     const chatAxios = axios.create({
       baseURL: this.config.apiBaseUrl,
       headers: {
         'Cookie': cookieString,
-        'Accept': 'application/json',
+        'Accept': '*/*',
         'Content-Type': 'application/json',
         'Origin': this.config.baseUrl,
-        'Referer': `${this.config.baseUrl}${SERVICE_PATH}/`,
-        'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36',
+        'Referer': `${this.config.baseUrl}${SERVICE_PATH}/?token=${this.authToken || ''}`,
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
       },
     });
 
@@ -891,19 +921,29 @@ export class CarcaraClient {
     );
 
     const choice = response.data.choices[0];
-    const aiMessage: LlamaMessage = {
-      id: `msg_${Date.now()}_${Math.random().toString(36).substring(2, 11)}`,
-      type: choice.message.tool_calls?.length ? 'tool_call' : 'assistant',
-      role: choice.message.role,
-      timestamp: Date.now(),
+    
+    // Salva resposta do assistente
+    const assistantMsg: LlamaMessage = {
+      id: crypto.randomUUID ? crypto.randomUUID() : `msg_${Date.now()}`,
+      convId: this.currentConversationId!,
+      role: 'assistant',
+      type: 'text',
       content: choice.message.content || '',
-      parentId: this.currentConversationId || undefined,
       children: [],
-      tool_calls: choice.message.tool_calls || [],
+      timestamp: Date.now(),
     };
+    await this.saveMessage(assistantMsg);
 
-    await this.saveMessage(aiMessage, this.currentConversationId!);
-    console.log('✅ Resposta recebida e salva');
+    // Atualiza currNode da conversa
+    const conversations = await this.getConversations();
+    const conv = conversations.find(c => c.id === this.currentConversationId);
+    if (conv) {
+      conv.currNode = assistantMsg.id;
+      conv.lastModified = Date.now();
+      await this.saveConversation(conv);
+    }
+
+    console.log('✅ Resposta salva no IndexedDB');
     return response.data;
   }
 

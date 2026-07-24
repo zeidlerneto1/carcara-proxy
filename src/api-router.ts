@@ -69,7 +69,7 @@ export class CarcaraRouter {
       }
     });
 
-    // ⭐ /v1/chat/completions - ATUALIZADO (32K contexto)
+    // ⭐ /v1/chat/completions - COM HISTÓRICO (anti-loop)
     this.app.post('/v1/chat/completions', async (req: Request, res: Response) => {
       try {
         const { model, messages, stream, tools } = req.body;
@@ -83,64 +83,39 @@ export class CarcaraRouter {
         const created = Math.floor(Date.now() / 1000);
         const modelName = model || this.client.getDefaultModel();
 
-        // ==========================================
-        // LIMITES PARA 32K CONTEXTO
-        // ==========================================
-        const MAX_PROMPT = 25000;
-        const MAX_MSG_CHARS = 4000;
-        const MAX_TOOL_CHARS = 8000;
-        const MAX_HISTORY = 10;
-
-        // System prompt sempre completo
+        // Pega system + últimas 4 mensagens (histórico pro agente)
         const systemMsg = msgs.find(m => m.role === 'system');
-        const recentMsgs = msgs.slice(-MAX_HISTORY);
-        
-        const promptParts: string[] = [];
-        let totalChars = 0;
+        const recentMsgs = msgs.slice(-4);
+        const parts: string[] = [];
 
-        if (systemMsg && !recentMsgs.includes(systemMsg)) {
-          const sysText = this.extractText(systemMsg.content);
-          promptParts.push(`<|im_start|>system\n${sysText}<|im_end|>\n`);
-          totalChars += sysText.length;
+        if (systemMsg) {
+          parts.push(`System: ${this.extractText(systemMsg.content)}`);
         }
 
         for (const m of recentMsgs) {
           let text = this.extractText(m.content);
-          if (!text && !m.tool_calls?.length) continue;
-
+          if (!text) continue;
+          
           const isLast = m === recentMsgs[recentMsgs.length - 1];
+          if (!isLast && text.length > 1000) {
+            text = text.substring(0, 1000);
+          }
 
           switch (m.role) {
-            case 'system':
-              promptParts.push(`<|im_start|>system\n${text}<|im_end|>\n`);
-              break;
-            case 'user':
-              if (!isLast && text.length > MAX_MSG_CHARS) {
-                text = text.substring(0, MAX_MSG_CHARS);
-              }
-              promptParts.push(`<|im_start|>user\n${text}<|im_end|>\n`);
-              break;
-            case 'assistant':
-              if (!isLast && text.length > MAX_MSG_CHARS) {
-                text = text.substring(0, MAX_MSG_CHARS);
-              }
-              promptParts.push(`<|im_start|>assistant\n${text}`);
+            case 'user': parts.push(`User: ${text}`); break;
+            case 'assistant': 
+              parts.push(`Assistant: ${text}`);
               if (m.tool_calls?.length) {
-                promptParts.push(JSON.stringify(m.tool_calls));
+                parts.push(`Tools: ${JSON.stringify(m.tool_calls).substring(0, 500)}`);
               }
-              promptParts.push(`<|im_end|>\n`);
               break;
-            case 'tool':
-              if (!isLast && text.length > MAX_TOOL_CHARS) {
-                text = text.substring(0, MAX_TOOL_CHARS);
-              }
-              promptParts.push(`<|im_start|>tool\n${text}<|im_end|>\n`);
+            case 'tool': 
+              parts.push(`Tool: ${isLast ? text : text.substring(0, 2000)}`); 
               break;
           }
         }
 
-        promptParts.push(`<|im_start|>assistant\n`);
-        const prompt = promptParts.join('');
+        const prompt = parts.join('\n');
 
         const lastMsg = recentMsgs[recentMsgs.length - 1];
         console.log(`💬 Prompt: ${prompt.length} chars | ${this.extractText(lastMsg.content).substring(0, 80)}`);
@@ -149,7 +124,7 @@ export class CarcaraRouter {
         const content = response?.choices?.[0]?.message?.content || '';
         const toolCalls: ToolCall[] | undefined = response?.choices?.[0]?.message?.tool_calls;
 
-        console.log(`🤖 Response: ${content.length} chars | ${content.substring(0, 80)}`);
+        console.log(`🤖 Response: ${content.length} chars`);
 
         // STREAMING SSE
         if (stream) {
@@ -172,12 +147,11 @@ export class CarcaraRouter {
             return res.end();
           }
 
-          const lines = content.split(/(\n+)/);
-          for (let i = 0; i < lines.length; i++) {
-            if (!lines[i]) continue;
+          const words = content.split(/(\s+)/);
+          for (let i = 0; i < words.length; i++) {
             res.write(`data: ${JSON.stringify({
               id: completionId, object: 'chat.completion.chunk', created, model: modelName,
-              choices: [{ index: 0, delta: i === 0 ? { role: 'assistant', content: lines[i] } : { content: lines[i] }, finish_reason: null }],
+              choices: [{ index: 0, delta: i === 0 ? { role: 'assistant', content: words[i] } : { content: words[i] }, finish_reason: null }],
             })}\n\n`);
           }
 
@@ -332,10 +306,20 @@ export class CarcaraRouter {
         const debug = [];
         for (const conv of convArray) {
           const messages = await this.client.getConversationMessages(conv.id);
+          const msgArray = Array.isArray(messages) ? messages : [];
           debug.push({
-            id: conv.id, name: conv.name, model: conv.model,
-            totalMessages: messages.length,
-            messages: messages.map(m => ({ role: m.role, content: m.content?.substring(0, 200) || '' })),
+            id: conv.id, 
+            name: conv.name,
+            lastModified: new Date(conv.lastModified).toISOString(),
+            currNode: conv.currNode,
+            mcpServers: conv.mcpServerOverrides?.length || 0,
+            thinkingEnabled: conv.thinkingEnabled,
+            totalMessages: msgArray.length,
+            messages: msgArray.slice(-5).map(m => ({ 
+              role: m.role, 
+              type: m.type,
+              content: m.content?.substring(0, 200) || '' 
+            })),
           });
         }
         res.json({ total: debug.length, conversations: debug });

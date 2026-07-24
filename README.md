@@ -604,4 +604,4 @@ MIT
 ---
 
 **Última atualização:** 2026-07-21  
-**Versão:** 1.0.1
+**Versão:** 1.0.4

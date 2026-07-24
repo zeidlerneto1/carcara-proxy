@@ -6,23 +6,22 @@ export interface CarcaraConfig {
 
 export interface LlamaMessage {
   id: string;
-  type: 'user' | 'assistant' | 'system' | 'tool_call';
-  role: string;
-  timestamp: number;
+  convId: string;
+  role: 'system' | 'user' | 'assistant';
+  type: 'root' | 'text';
   content: string;
-  parentId?: string;
+  parent?: string;
   children: string[];
-  tool_calls?: ToolCall[];
-  conversationId?: string;
+  timestamp: number;
 }
 
 export interface ConversationNode {
   id: string;
   name: string;
+  lastModified: number;
   currNode: string;
-  lasModified: number;  
-  model: string;
-  system: string;
+  mcpServerOverrides: Array<{ serverId: string; enabled: boolean }>;
+  thinkingEnabled: boolean;
 }
 
 export interface ChatCompletionResponse {
@@ -67,7 +66,6 @@ export interface MCPListResponse {
   };
 }
 
-// API
 export interface LoginPayload {
   action: 'login';
   user: string;
@@ -89,20 +87,16 @@ export interface LoginResponse {
 
 export interface ModelInfo {
   id: string;
-  name: string;
+  name?: string;
   description?: string;
-  context_length?: number;
-  pricing?: {
-    prompt: string;
-    completion: string;
-  };
+  max_input_tokens?: number;
+  max_output_tokens?: number;
 }
 
 export interface ModelsResponse {
   data: ModelInfo[];
 }
 
-// Login Recorder
 export interface LoginStep {
   type: 'navigate' | 'click' | 'fill' | 'wait' | 'select' | 'press' | 'api_request';
   selector?: string;
@@ -147,15 +141,8 @@ export interface StoredSession {
   }>;
   phpsessid?: string;
   timestamp: number;
-  userInfo?: {
-    id: string;
-    name: string;
-    email: string;
-    domain: string;
-  };
 }
 
-// Chat Message (OpenAI format)
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
   content: string;
@@ -164,7 +151,6 @@ export interface ChatMessage {
   tool_call_id?: string;
 }
 
-// MCP Tools
 export interface MCPToolDefinition {
   name: string;
   description: string;
@@ -176,12 +162,9 @@ export interface MCPToolDefinition {
   handler: (params: any) => Promise<any>;
 }
 
-// Search
 export interface SearchResult {
   title: string;
   snippet: string;
   url: string;
   source: string;
-  date?: string;
-  relevance?: number;
 }
