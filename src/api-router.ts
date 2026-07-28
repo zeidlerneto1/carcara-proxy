@@ -259,6 +259,15 @@ export class CarcaraRouter {
       res.json({ model: 'Qwen3.6-35B', embeddings: [[0]], total_duration: 0, load_duration: 0, prompt_eval_count: 0 });
     });
 
+    this.app.get('/api/conversations/:id/export', async (req: Request, res: Response) => {
+      try {
+        const filePath = await this.client.saveConversationToFile(req.params.id);
+        res.json({ success: true, path: filePath });
+      } catch (error: any) {
+        res.status(500).json({ error: error.message });
+      }
+    });
+
     this.app.get('/mcp/list', async (_req: Request, res: Response) => {
       try {
         const carcaraTools = await this.client.listSdumontTools();
@@ -367,6 +376,7 @@ export class CarcaraRouter {
         console.log(`   GET  /api/debug/conversations → Debug detalhado`);
         console.log(`   GET  /api/tools              → Ferramentas Carcara`);
         console.log(`   POST /api/tools/:server/:mtd → Chamar tool`);
+        console.log(`   GET  /api/conversations/:id/export → Exportar conversa`);
         console.log('═══════════════════════════════════════');
         console.log(`📁 Sessão: .carcara/session.json`);
         console.log('═══════════════════════════════════════\n');

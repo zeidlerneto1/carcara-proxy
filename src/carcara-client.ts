@@ -291,17 +291,17 @@ export class CarcaraClient {
   // NAVEGADOR
   // ==========================================================================
 
+  // Helper para parse seguro
+  public tryParseJSON(text: string): any {
+    try { return JSON.parse(text); } catch { return text; }
+  }
+
   private async launchBrowser(): Promise<void> {
     console.log('🌐 Iniciando navegador em modo silencioso...');
     
     this.browser = await chromium.launch({ 
       headless: true,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-gpu',
-      ],
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
     });
     
     this.context = await this.browser.newContext({
@@ -311,6 +311,42 @@ export class CarcaraClient {
     
     this.page = await this.context.newPage();
     this.page.setDefaultTimeout(TIMEOUT_NAVIGATION);
+
+    // ==========================================
+    // INTERCEPTA TRÁFEGO DO CHAT
+    // ==========================================
+    this.page.on('response', async (response) => {
+      const url = response.url();
+      
+      // Só intercepta chamadas de chat
+      if (url.includes('/v1/chat/completions') && response.request().method() === 'POST') {
+        try {
+          const requestBody = response.request().postData();
+          const responseBody = await response.text();
+          
+          // Salva em arquivo
+          const chatDir = path.join(process.cwd(), '.carcara', 'chats');
+          if (!fs.existsSync(chatDir)) fs.mkdirSync(chatDir, { recursive: true });
+          
+          const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+          const fileName = `traffic_${timestamp}.json`;
+          const filePath = path.join(chatDir, fileName);
+          
+          const data = {
+            timestamp: new Date().toISOString(),
+            url: url,
+            status: response.status(),
+            request: requestBody ? JSON.parse(requestBody) : null,
+            response: this.tryParseJSON(responseBody),
+          };
+          
+          fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf-8');
+          console.log(`📡 Tráfego salvo: ${fileName}`);
+        } catch (e) {
+          // Silencioso - não quebra o fluxo
+        }
+      }
+    });
     
     console.log('✅ Navegador iniciado em background');
   }
@@ -819,6 +855,47 @@ export class CarcaraClient {
     `, message);
   }
 
+  async saveConversationToFile(convId: string): Promise<string> {
+    this.ensureInitialized();
+    
+    const conversations = await this.getConversations();
+    const conv = conversations.find(c => c.id === convId);
+    if (!conv) throw new Error('Conversa não encontrada');
+    
+    const messages = await this.getConversationMessages(convId);
+    
+    // Cria diretório
+    const chatDir = path.join(process.cwd(), '.carcara', 'chats');
+    if (!fs.existsSync(chatDir)) {
+      fs.mkdirSync(chatDir, { recursive: true });
+    }
+    
+    // Nome do arquivo: nome_da_conversa_UUID.json
+    const safeName = conv.name.replace(/[^a-zA-Z0-9]/g, '_').substring(0, 50);
+    const fileName = `${safeName}_${convId.substring(0, 8)}.json`;
+    const filePath = path.join(chatDir, fileName);
+    
+    // Formato legível
+    const data = {
+      conversa: {
+        id: conv.id,
+        nome: conv.name,
+        data: new Date(conv.lastModified).toISOString(),
+        servidoresMCP: conv.mcpServerOverrides?.length || 0,
+      },
+      mensagens: messages.map(m => ({
+        papel: m.role,
+        tipo: m.type,
+        conteudo: m.content,
+        data: new Date(m.timestamp).toISOString(),
+      })),
+    };
+    
+    fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf-8');
+    console.log(`💾 Conversa salva: ${filePath}`);
+    return filePath;
+  }
+
   // ==========================================================================
   // CHAT E MCP (ATUALIZADO COM ESTRUTURA REAL DO LlamaUI)
   // ==========================================================================
@@ -941,6 +1018,32 @@ export class CarcaraClient {
       conv.currNode = assistantMsg.id;
       conv.lastModified = Date.now();
       await this.saveConversation(conv);
+    }
+
+    // ==========================================
+    // SALVA EM ARQUIVO (sempre funciona)
+    // ==========================================
+    try {
+      const chatDir = path.join(process.cwd(), '.carcara', 'chats');
+      if (!fs.existsSync(chatDir)) fs.mkdirSync(chatDir, { recursive: true });
+      
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const fileName = `chat_${timestamp}.json`;
+      const filePath = path.join(chatDir, fileName);
+      
+      const data = {
+        timestamp: new Date().toISOString(),
+        conversationId: this.currentConversationId,
+        model: modelToUse,
+        prompt: prompt,
+        response: choice.message.content,
+        toolCalls: choice.message.tool_calls || null,
+      };
+      
+      fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf-8');
+      console.log(`💾 Chat salvo: ${fileName}`);
+    } catch (e: any) {
+      console.log(`⚠️ Erro ao salvar arquivo: ${e.message}`);
     }
 
     console.log('✅ Resposta salva no IndexedDB');
