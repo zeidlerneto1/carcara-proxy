@@ -591,9 +591,8 @@ MIT
 
 ## Suporte
 
-- 📧 **Email:** peter@example.com
+- 📧 **Email:** peterzeidler12@gmail.com
 - 🐛 **Issues:** https://github.com/zeidlerneto1/carcara-proxy/issues
-- 📚 **Docs LNCC:** https://carcara.sinapad.lncc.br
 
 ---
 
