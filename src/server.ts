@@ -1,16 +1,9 @@
-// src/server.ts
-import { CarcaraRouter } from './api-router';
+import { CarcaraRouter } from './api-router.js';
 
-async function main() {
-  const router = new CarcaraRouter(3030);
+const PORT = parseInt(process.env.PORT || '3030', 10);
+const router = new CarcaraRouter(PORT);
 
-  process.on('SIGINT', async () => {
-    console.log('\n🛑 Encerrando...');
-    await router.stop();
-    process.exit(0);
-  });
-
-  await router.start();
-}
-
-main().catch(console.error);
+router.start().catch((err) => {
+  console.error('Failed to start server:', err);
+  process.exit(1);
+});

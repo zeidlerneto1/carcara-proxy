@@ -1,10 +1,26 @@
-// src/api-router.ts - COMPLETO COM MCP E SEARCH
 import express, { Request, Response } from 'express';
 import cors from 'cors';
-import { CarcaraClient } from './carcara-client';
-import { customMCPTools } from './mcp-tools';
-import { SearchService } from './search-service';
-import { ChatMessage, ToolCall } from './types';
+import compression from 'compression';
+import helmet from 'helmet';
+import rateLimit from 'express-rate-limit';
+import { CarcaraClient } from './carcara-client.js';
+import { customMCPTools } from './mcp-tools.js';
+import { SearchService } from './search-service.js';
+import { ChatMessage, ToolCall } from './types.js';
+
+const limiter = rateLimit({
+  windowMs: 1 * 60 * 1000,
+  max: 120,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests, please try again later' },
+});
+
+const strictLimiter = rateLimit({
+  windowMs: 1 * 60 * 1000,
+  max: 30,
+  message: { error: 'Rate limit exceeded for chat endpoint' },
+});
 
 export class CarcaraRouter {
   private app: express.Application;
@@ -19,7 +35,6 @@ export class CarcaraRouter {
     this.app = express();
   }
 
-  // Extrai texto de qualquer formato de content
   private extractText(content: any): string {
     if (!content) return '';
     if (typeof content === 'string') return content;
@@ -39,13 +54,20 @@ export class CarcaraRouter {
 
   async start(): Promise<void> {
     // ==========================================
-    // MIDDLEWARE
+    // MIDDLEWARE (otimizado)
     // ==========================================
+    this.app.use(helmet({
+      contentSecurityPolicy: false,
+      crossOriginEmbedderPolicy: false,
+    }));
     this.app.use(cors());
+    this.app.use(compression());
     this.app.use(express.json({ limit: '10mb' }));
+    this.app.use(limiter);
 
+    // Request logging leve
     this.app.use((req: Request, _res: Response, next) => {
-      console.log(`📡 ${req.method} ${req.url}`);
+      console.log(`${new Date().toISOString()} ${req.method} ${req.url}`);
       next();
     });
 
@@ -59,7 +81,8 @@ export class CarcaraRouter {
         res.json({
           object: 'list',
           data: models.map(m => ({
-            id: m.id, object: 'model',
+            id: m.id,
+            object: 'model',
             created: Math.floor(Date.now() / 1000),
             owned_by: 'carcara-lncc',
           })),
@@ -69,8 +92,8 @@ export class CarcaraRouter {
       }
     });
 
-    // ⭐ /v1/chat/completions - COM HISTÓRICO (anti-loop)
-    this.app.post('/v1/chat/completions', async (req: Request, res: Response) => {
+    // Chat completions com streaming otimizado
+    this.app.post('/v1/chat/completions', strictLimiter, async (req: Request, res: Response) => {
       try {
         const { model, messages, stream, tools } = req.body;
         const msgs: ChatMessage[] = messages || [];
@@ -79,11 +102,11 @@ export class CarcaraRouter {
           return res.status(400).json({ error: 'Messages are required' });
         }
 
-        const completionId = `chatcmpl-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`;
+        const completionId = `chatcmpl-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
         const created = Math.floor(Date.now() / 1000);
         const modelName = model || this.client.getDefaultModel();
 
-        // Pega system + últimas 4 mensagens (histórico pro agente)
+        // Monta prompt com historico (ultimas 4 msgs)
         const systemMsg = msgs.find(m => m.role === 'system');
         const recentMsgs = msgs.slice(-4);
         const parts: string[] = [];
@@ -95,38 +118,35 @@ export class CarcaraRouter {
         for (const m of recentMsgs) {
           let text = this.extractText(m.content);
           if (!text) continue;
-          
           const isLast = m === recentMsgs[recentMsgs.length - 1];
           if (!isLast && text.length > 1000) {
             text = text.substring(0, 1000);
           }
-
           switch (m.role) {
             case 'user': parts.push(`User: ${text}`); break;
-            case 'assistant': 
+            case 'assistant':
               parts.push(`Assistant: ${text}`);
               if (m.tool_calls?.length) {
                 parts.push(`Tools: ${JSON.stringify(m.tool_calls).substring(0, 500)}`);
               }
               break;
-            case 'tool': 
-              parts.push(`Tool: ${isLast ? text : text.substring(0, 2000)}`); 
+            case 'tool':
+              parts.push(`Tool: ${isLast ? text : text.substring(0, 2000)}`);
               break;
           }
         }
 
         const prompt = parts.join('\n');
-
         const lastMsg = recentMsgs[recentMsgs.length - 1];
-        console.log(`💬 Prompt: ${prompt.length} chars | ${this.extractText(lastMsg.content).substring(0, 80)}`);
+        console.log(`Prompt: ${prompt.length} chars | ${this.extractText(lastMsg.content).substring(0, 80)}`);
 
         const response = await this.client.chatCompletion(prompt, model, tools);
         const content = response?.choices?.[0]?.message?.content || '';
         const toolCalls: ToolCall[] | undefined = response?.choices?.[0]?.message?.tool_calls;
 
-        console.log(`🤖 Response: ${content.length} chars`);
+        console.log(`Response: ${content.length} chars`);
 
-        // STREAMING SSE
+        // STREAMING SSE otimizado (chunks de 20 chars)
         if (stream) {
           res.setHeader('Content-Type', 'text/event-stream');
           res.setHeader('Cache-Control', 'no-cache');
@@ -147,11 +167,16 @@ export class CarcaraRouter {
             return res.end();
           }
 
-          const words = content.split(/(\s+)/);
-          for (let i = 0; i < words.length; i++) {
+          // Envia em chunks de 20 caracteres (mais eficiente que palavra por palavra)
+          const CHUNK_SIZE = 20;
+          for (let i = 0; i < content.length; i += CHUNK_SIZE) {
+            const chunk = content.slice(i, i + CHUNK_SIZE);
+            const delta = i === 0
+              ? { role: 'assistant', content: chunk }
+              : { content: chunk };
             res.write(`data: ${JSON.stringify({
               id: completionId, object: 'chat.completion.chunk', created, model: modelName,
-              choices: [{ index: 0, delta: i === 0 ? { role: 'assistant', content: words[i] } : { content: words[i] }, finish_reason: null }],
+              choices: [{ index: 0, delta, finish_reason: null }],
             })}\n\n`);
           }
 
@@ -163,9 +188,12 @@ export class CarcaraRouter {
           return res.end();
         }
 
-        // Não-streaming
+        // Nao-streaming
         res.json({
-          id: completionId, object: 'chat.completion', created, model: modelName,
+          id: completionId,
+          object: 'chat.completion',
+          created,
+          model: modelName,
           choices: [{
             index: 0,
             message: { role: 'assistant', content, tool_calls: toolCalls },
@@ -175,11 +203,10 @@ export class CarcaraRouter {
         });
 
       } catch (error: any) {
-        console.error('❌', error.message);
+        console.error('Chat completion error:', error.message);
         res.status(500).json({ error: { message: error.message, type: 'api_error' } });
       }
     });
-
 
     // Embeddings
     this.app.post('/v1/embeddings', async (req: Request, res: Response) => {
@@ -188,7 +215,11 @@ export class CarcaraRouter {
         const inputs = Array.isArray(input) ? input : [input];
         res.json({
           object: 'list',
-          data: inputs.map((_, i) => ({ object: 'embedding', embedding: new Array(1536).fill(0), index: i })),
+          data: inputs.map((_: any, i: number) => ({
+            object: 'embedding',
+            embedding: new Array(1536).fill(0),
+            index: i,
+          })),
           model: model || 'Qwen3.6-35B',
           usage: { prompt_tokens: 0, total_tokens: 0 },
         });
@@ -210,11 +241,21 @@ export class CarcaraRouter {
         const models = await this.client.getAvailableModels();
         res.json({
           models: models.map(m => ({
-            name: m.id, model: m.id, modified_at: new Date().toISOString(), size: 0, digest: m.id,
-            details: { format: 'gguf', family: 'llama', parameter_size: m.id.includes('70b') ? '70B' : m.id.includes('35B') ? '35B' : 'unknown' },
+            name: m.id,
+            model: m.id,
+            modified_at: new Date().toISOString(),
+            size: 0,
+            digest: m.id,
+            details: {
+              format: 'gguf',
+              family: 'llama',
+              parameter_size: m.id.includes('70b') ? '70B' : m.id.includes('35B') ? '35B' : 'unknown',
+            },
           })),
         });
-      } catch (error: any) { res.status(500).json({ error: error.message }); }
+      } catch (error: any) {
+        res.status(500).json({ error: error.message });
+      }
     });
 
     this.app.post('/api/show', async (req: Request, res: Response) => {
@@ -223,21 +264,37 @@ export class CarcaraRouter {
         const models = await this.client.getAvailableModels();
         const model = models.find(m => m.id === name);
         if (!model) return res.status(404).json({ error: 'Model not found' });
-        res.json({ license: 'LNCC License', modelfile: `# ${model.name}`, parameters: '', template: '', details: { format: 'gguf', family: 'llama' }, model_info: model });
-      } catch (error: any) { res.status(500).json({ error: error.message }); }
+        res.json({
+          license: 'LNCC License',
+          modelfile: `# ${model.name}`,
+          parameters: '',
+          template: '',
+          details: { format: 'gguf', family: 'llama' },
+          model_info: model,
+        });
+      } catch (error: any) {
+        res.status(500).json({ error: error.message });
+      }
     });
 
-    this.app.post('/api/generate', async (req: Request, res: Response) => {
+    this.app.post('/api/generate', strictLimiter, async (req: Request, res: Response) => {
       try {
-        const { model, prompt, system, stream } = req.body;
+        const { model, prompt, system } = req.body;
         if (!prompt) return res.status(400).json({ error: 'Prompt is required' });
         const fullPrompt = system ? `${system}\n\n${prompt}` : prompt;
         const response = await this.client.chatCompletion(fullPrompt, model);
-        res.json({ model: model || 'Qwen3.6-35B', created_at: new Date().toISOString(), response: response.choices[0].message.content, done: true });
-      } catch (error: any) { res.status(500).json({ error: error.message }); }
+        res.json({
+          model: model || 'Qwen3.6-35B',
+          created_at: new Date().toISOString(),
+          response: response.choices[0].message.content,
+          done: true,
+        });
+      } catch (error: any) {
+        res.status(500).json({ error: error.message });
+      }
     });
 
-    this.app.post('/api/chat', async (req: Request, res: Response) => {
+    this.app.post('/api/chat', strictLimiter, async (req: Request, res: Response) => {
       try {
         const { model, messages } = req.body;
         const msgs: ChatMessage[] = messages || [];
@@ -246,17 +303,28 @@ export class CarcaraRouter {
         if (!lastUserMsg) return res.status(400).json({ error: 'No user message found' });
         const response = await this.client.chatCompletion(lastUserMsg.content, model);
         res.json({
-          model: model || 'Qwen3.6-35B', created_at: new Date().toISOString(),
+          model: model || 'Qwen3.6-35B',
+          created_at: new Date().toISOString(),
           message: { role: 'assistant', content: response.choices[0].message.content },
-          done: true, total_duration: 0, load_duration: 0,
+          done: true,
+          total_duration: 0,
+          load_duration: 0,
         });
-      } catch (error: any) { res.status(500).json({ error: error.message }); }
+      } catch (error: any) {
+        res.status(500).json({ error: error.message });
+      }
     });
 
     this.app.post('/api/embed', async (req: Request, res: Response) => {
       const { input } = req.body;
       if (!input) return res.status(400).json({ error: 'Input is required' });
-      res.json({ model: 'Qwen3.6-35B', embeddings: [[0]], total_duration: 0, load_duration: 0, prompt_eval_count: 0 });
+      res.json({
+        model: 'Qwen3.6-35B',
+        embeddings: [[0]],
+        total_duration: 0,
+        load_duration: 0,
+        prompt_eval_count: 0,
+      });
     });
 
     this.app.get('/api/conversations/:id/export', async (req: Request, res: Response) => {
@@ -272,10 +340,18 @@ export class CarcaraRouter {
       try {
         const carcaraTools = await this.client.listSdumontTools();
         const carcaraToolList = carcaraTools?.result?.tools || [];
-        const customTools = customMCPTools.map(t => ({ name: t.name, description: t.description, inputSchema: t.inputSchema }));
+        const customTools = customMCPTools.map(t => ({
+          name: t.name,
+          description: t.description,
+          inputSchema: t.inputSchema,
+        }));
         res.json({ tools: [...customTools, ...carcaraToolList] });
       } catch {
-        res.json({ tools: customMCPTools.map(t => ({ name: t.name, description: t.description, inputSchema: t.inputSchema })) });
+        res.json({ tools: customMCPTools.map(t => ({
+          name: t.name,
+          description: t.description,
+          inputSchema: t.inputSchema,
+        })) });
       }
     });
 
@@ -283,9 +359,15 @@ export class CarcaraRouter {
       try {
         const { name, arguments: args } = req.body;
         const customTool = customMCPTools.find(t => t.name === name);
-        if (customTool) return res.json({ result: await customTool.handler(args || {}) });
-        res.json({ result: await this.client.callMcpTool('lncc-sdumont', 'tools/call', { name, arguments: args }) });
-      } catch (error: any) { res.status(500).json({ error: error.message }); }
+        if (customTool) {
+          return res.json({ result: await customTool.handler(args || {}) });
+        }
+        res.json({
+          result: await this.client.callMcpTool('lncc-sdumont', 'tools/call', { name, arguments: args }),
+        });
+      } catch (error: any) {
+        res.status(500).json({ error: error.message });
+      }
     });
 
     this.app.post('/api/search', async (req: Request, res: Response) => {
@@ -317,73 +399,77 @@ export class CarcaraRouter {
           const messages = await this.client.getConversationMessages(conv.id);
           const msgArray = Array.isArray(messages) ? messages : [];
           debug.push({
-            id: conv.id, 
+            id: conv.id,
             name: conv.name,
             lastModified: new Date(conv.lastModified).toISOString(),
             currNode: conv.currNode,
             mcpServers: conv.mcpServerOverrides?.length || 0,
             thinkingEnabled: conv.thinkingEnabled,
             totalMessages: msgArray.length,
-            messages: msgArray.slice(-5).map(m => ({ 
-              role: m.role, 
+            messages: msgArray.slice(-5).map(m => ({
+              role: m.role,
               type: m.type,
-              content: m.content?.substring(0, 200) || '' 
+              content: m.content?.substring(0, 200) || '',
             })),
           });
         }
         res.json({ total: debug.length, conversations: debug });
-      } catch { res.json({ total: 0, conversations: [] }); }
+      } catch {
+        res.json({ total: 0, conversations: [] });
+      }
     });
 
     // ==========================================
     // INICIALIZAR
     // ==========================================
-    console.log('🚀 Inicializando Carcara Client...');
-    try { await this.client.init(); console.log('✅ Cliente pronto!'); }
-    catch (error: any) { console.error('❌ Erro:', error.message); }
+    console.log('Inicializando Carcara Client...');
+    try {
+      await this.client.init();
+      console.log('Cliente pronto!');
+    } catch (error: any) {
+      console.error('Erro na inicializacao:', error.message);
+    }
 
-    return new Promise<void>((resolve) => {
+    return new Promise((resolve) => {
       this.app.listen(this.port, () => {
         console.log(`\n🦙 Carcara AI Gateway`);
         console.log(`🌐 http://localhost:${this.port}`);
         console.log('═══════════════════════════════════════');
         console.log('📋 OpenAI Compatible:');
-        console.log(`   GET  /v1/models              → Listar modelos`);
-        console.log(`   POST /v1/chat/completions    → Chat (stream/não-stream)`);
-        console.log(`   POST /v1/embeddings          → Embeddings`);
+        console.log(` GET /v1/models → Listar modelos`);
+        console.log(` POST /v1/chat/completions → Chat (stream/nao-stream)`);
+        console.log(` POST /v1/embeddings → Embeddings`);
         console.log('');
         console.log('📋 Ollama Compatible:');
-        console.log(`   GET  /api/health             → Health check`);
-        console.log(`   GET  /api/tags               → Listar modelos`);
-        console.log(`   POST /api/show               → Info do modelo`);
-        console.log(`   POST /api/generate           → Gerar texto`);
-        console.log(`   POST /api/chat               → Chat`);
-        console.log(`   POST /api/embed              → Embeddings`);
+        console.log(` GET /api/health → Health check`);
+        console.log(` GET /api/tags → Listar modelos`);
+        console.log(` POST /api/show → Info do modelo`);
+        console.log(` POST /api/generate → Gerar texto`);
+        console.log(` POST /api/chat → Chat`);
+        console.log(` POST /api/embed → Embeddings`);
         console.log('');
         console.log('📋 MCP Tools:');
-        console.log(`   GET  /mcp/list               → Listar ferramentas`);
-        console.log(`   POST /mcp/call               → Chamar ferramenta`);
+        console.log(` GET /mcp/list → Listar ferramentas`);
+        console.log(` POST /mcp/call → Chamar ferramenta`);
         console.log('');
         console.log('📋 Search:');
-        console.log(`   POST /api/search             → Busca multi-provider`);
-        console.log(`   POST /api/search/ddg         → DuckDuckGo`);
-        console.log(`   POST /api/search/wiki        → Wikipedia`);
+        console.log(` POST /api/search → Busca multi-provider`);
+        console.log(` POST /api/search/ddg → DuckDuckGo`);
+        console.log(` POST /api/search/wiki → Wikipedia`);
         console.log('');
         console.log('📋 Debug:');
-        console.log(`   GET  /ping                   → Ping`);
-        console.log(`   GET  /api/conversations      → Listar conversas`);
-        console.log(`   GET  /api/conversations/:id   → Mensagens`);
-        console.log(`   GET  /api/debug/conversations → Debug detalhado`);
-        console.log(`   GET  /api/tools              → Ferramentas Carcara`);
-        console.log(`   POST /api/tools/:server/:mtd → Chamar tool`);
-        console.log(`   GET  /api/conversations/:id/export → Exportar conversa`);
+        console.log(` GET /ping → Ping`);
+        console.log(` GET /api/debug/conversations → Debug detalhado`);
+        console.log(` GET /api/conversations/:id/export → Exportar conversa`);
         console.log('═══════════════════════════════════════');
-        console.log(`📁 Sessão: .carcara/session.json`);
+        console.log(`📁 Sessao: .carcara/session.json`);
         console.log('═══════════════════════════════════════\n');
         resolve();
       });
     });
   }
 
-  async stop(): Promise<void> { await this.client.close(); }
+  async stop(): Promise<void> {
+    await this.client.close();
+  }
 }

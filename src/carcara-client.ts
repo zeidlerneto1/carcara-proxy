@@ -1,25 +1,14 @@
-/// <reference lib="dom" />
-
 import { chromium, Browser, BrowserContext, Page } from 'playwright';
-import axios, { AxiosInstance } from 'axios';
-import * as fs from 'fs';
+import axios, { AxiosInstance, InternalAxiosRequestConfig } from 'axios';
+import * as fs from 'fs/promises';
 import * as path from 'path';
-import * as dotenv from 'dotenv';
-import { 
-  CarcaraConfig, 
-  LlamaMessage, 
-  ConversationNode, 
-  ChatCompletionResponse, 
-  MCPListResponse,
-  LoginPayload,
-  ModelInfo,
-  ModelsResponse,
-  LoginScript,
-  LoginStep,
-  StoredSession
-} from './types';
+import pino from 'pino';
+import {
+  CarcaraConfig, LlamaMessage, ConversationNode, ChatCompletionResponse,
+  MCPListResponse, LoginPayload, ModelInfo, LoginScript, LoginStep, StoredSession
+} from './types.js';
 
-dotenv.config();
+const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
 
 // ============================================================================
 // CONSTANTES
@@ -42,7 +31,6 @@ const DEFAULT_MODEL = 'Qwen3.6-35B';
 const DEFAULT_TITLE = 'Nova Conversa LNCC';
 const DEFAULT_TEMPERATURE = 0.5;
 const DEFAULT_MAX_TOKENS = 4096;
-const MAX_CONTEXT_TOKENS = 32768;
 
 const ENV_USER = 'LNCC_USER';
 const ENV_PASS = 'LNCC_PASS';
@@ -54,9 +42,10 @@ const TIMEOUT_RETRY = 1000;
 const TIMEOUT_CHAT = 100000;
 const TIMEOUT_SESSION_EXPIRY = 24 * 60 * 60 * 1000;
 const MAX_RETRIES = 3;
+const MODELS_CACHE_TTL = 60 * 60 * 1000;
 
 // ============================================================================
-// CLASSE DE RECORDER (mantida igual)
+// LOGGER / RECORDER (async, non-blocking)
 // ============================================================================
 
 class LoginRecorder {
@@ -66,9 +55,11 @@ class LoginRecorder {
 
   constructor() {
     this.basePath = path.join(process.cwd(), '.carcara');
-    if (!fs.existsSync(this.basePath)) {
-      fs.mkdirSync(this.basePath, { recursive: true });
-    }
+    this.ensureDir().catch(() => {});
+  }
+
+  private async ensureDir(): Promise<void> {
+    await fs.mkdir(this.basePath, { recursive: true });
   }
 
   get scriptPath(): string { return path.join(this.basePath, 'login-script.json'); }
@@ -79,22 +70,22 @@ class LoginRecorder {
   startRecording(): void {
     this.isRecording = true;
     this.steps = [];
-    this.log('🎬 Gravando processo de login...');
+    logger.info('Gravando processo de login...');
   }
 
   stopRecording(): void {
     this.isRecording = false;
-    this.log('⏹️ Gravação finalizada');
+    logger.info('Gravacao finalizada');
   }
 
   recordStep(step: LoginStep): void {
     if (this.isRecording) {
       this.steps.push(step);
-      this.log(`📝 ${step.type}: ${step.description || ''}`);
+      logger.info({ step: step.type, desc: step.description }, 'Passo gravado');
     }
   }
 
-  saveLoginScript(): void {
+  async saveLoginScript(): Promise<void> {
     const script: LoginScript = {
       version: '2.0',
       url: CARCARA_BASE_URL,
@@ -105,16 +96,15 @@ class LoginRecorder {
         responseStatus: 200,
       },
     };
-
-    fs.writeFileSync(this.scriptPath, JSON.stringify(script, null, 2), 'utf-8');
-    this.log(`✅ Script salvo (${this.steps.length} passos)`);
+    await fs.writeFile(this.scriptPath, JSON.stringify(script, null, 2), 'utf-8');
+    logger.info({ steps: this.steps.length }, 'Script salvo');
   }
 
   async saveSession(page: Page, token?: string): Promise<void> {
     try {
       const cookies = await page.context().cookies();
       const phpsessid = cookies.find(c => c.name === 'PHPSESSID')?.value;
-      const carcareAuth = cookies.find(c => c.name === 'carcara_auth')?.value;
+      const carcaraAuth = cookies.find(c => c.name === 'carcara_auth')?.value;
 
       const session: StoredSession = {
         token: token || '',
@@ -123,84 +113,63 @@ class LoginRecorder {
         timestamp: Date.now(),
       };
 
-      if (carcareAuth) {
-        (session as any).carcaraAuth = carcareAuth;
+      if (carcaraAuth) {
+        (session as any).carcaraAuth = carcaraAuth;
       }
 
-      fs.writeFileSync(this.sessionPath, JSON.stringify(session, null, 2), 'utf-8');
-      this.log('💾 Sessão salva');
-      this.log(`   PHPSESSID: ${phpsessid ? phpsessid.substring(0, 10) + '...' : 'N/A'}`);
-      this.log(`   carcara_auth: ${carcareAuth ? carcareAuth.substring(0, 10) + '...' : 'N/A'}`);
-    } catch (error) {
-      this.log(`⚠️ Erro ao salvar sessão: ${error}`);
+      await fs.writeFile(this.sessionPath, JSON.stringify(session, null, 2), 'utf-8');
+      logger.info({ phpsessid: phpsessid?.slice(0, 10), carcaraAuth: carcaraAuth?.slice(0, 10) }, 'Sessao salva');
+    } catch (error: any) {
+      logger.warn({ error: error.message }, 'Erro ao salvar sessao');
     }
   }
 
   async restoreSession(page: Page): Promise<StoredSession | null> {
     try {
-      if (!fs.existsSync(this.sessionPath)) {
-        return null;
-      }
-
-      const session: StoredSession = JSON.parse(
-        fs.readFileSync(this.sessionPath, 'utf-8')
-      );
+      const data = await fs.readFile(this.sessionPath, 'utf-8');
+      const session: StoredSession = JSON.parse(data);
 
       if (Date.now() - session.timestamp > TIMEOUT_SESSION_EXPIRY) {
-        this.log('⚠️ Sessão expirada (>24h)');
+        logger.warn('Sessao expirada (>24h)');
         return null;
       }
 
-      if (session.cookies && session.cookies.length > 0) {
+      if (session.cookies?.length) {
         await page.context().addCookies(session.cookies as any);
-        this.log('🍪 Cookies restaurados');
+        logger.info('Cookies restaurados');
       }
 
       const serviceUrl = `${CARCARA_BASE_URL}${SERVICE_PATH}/`;
-      if (session.token) {
-        await page.goto(`${serviceUrl}?token=${session.token}`, {
-          waitUntil: 'networkidle',
-          timeout: TIMEOUT_NAVIGATION,
-        });
-      } else {
-        await page.goto(serviceUrl, {
-          waitUntil: 'networkidle',
-          timeout: TIMEOUT_NAVIGATION,
-        });
-      }
-
+      const url = session.token ? `${serviceUrl}?token=${session.token}` : serviceUrl;
+      await page.goto(url, { waitUntil: 'networkidle', timeout: TIMEOUT_NAVIGATION });
       await page.waitForTimeout(2000);
       return session;
-    } catch (error) {
-      this.log(`❌ Erro ao restaurar sessão: ${error}`);
+    } catch (error: any) {
+      logger.error({ error: error.message }, 'Erro ao restaurar sessao');
       return null;
     }
   }
 
-  saveModelsCache(models: ModelInfo[]): void {
+  async saveModelsCache(models: ModelInfo[]): Promise<void> {
     const cache = { timestamp: Date.now(), models };
-    fs.writeFileSync(this.modelsPath, JSON.stringify(cache, null, 2), 'utf-8');
-    this.log(`💾 Cache de ${models.length} modelos salvo`);
+    await fs.writeFile(this.modelsPath, JSON.stringify(cache, null, 2), 'utf-8');
+    logger.info({ count: models.length }, 'Cache de modelos salvo');
   }
 
-  loadModelsCache(): ModelInfo[] | null {
+  async loadModelsCache(): Promise<ModelInfo[] | null> {
     try {
-      if (fs.existsSync(this.modelsPath)) {
-        const cache = JSON.parse(fs.readFileSync(this.modelsPath, 'utf-8'));
-        if (Date.now() - cache.timestamp < 60 * 60 * 1000) {
-          this.log(`📂 Cache de modelos carregado (${cache.models.length} modelos)`);
-          return cache.models;
-        }
+      const data = await fs.readFile(this.modelsPath, 'utf-8');
+      const cache = JSON.parse(data);
+      if (Date.now() - cache.timestamp < MODELS_CACHE_TTL) {
+        logger.info({ count: cache.models.length }, 'Cache de modelos carregado');
+        return cache.models;
       }
-    } catch {}
+    } catch { /* no cache */ }
     return null;
   }
 
   log(message: string): void {
-    const timestamp = new Date().toISOString();
-    const logMessage = `[${timestamp}] ${message}\n`;
-    console.log(`  ${message}`);
-    fs.appendFileSync(this.logPath, logMessage, 'utf-8');
+    logger.info(message);
   }
 }
 
@@ -215,18 +184,21 @@ export class CarcaraClient {
   private axiosInstance: AxiosInstance;
   private config: { baseUrl: string; apiBaseUrl: string; domain: string };
   private recorder: LoginRecorder;
-  
+
   private authToken: string | null = null;
   private phpsessid: string | null = null;
-  private carcareAuth: string | null = null;
+  private carcaraAuth: string | null = null;
+  private cookieStringCache: string = '';
+  private cookieStringCacheTime: number = 0;
   private currentConversationId: string | null = null;
   private isInitialized = false;
   private availableModels: ModelInfo[] = [];
+  private modelsCacheTime = 0;
 
   constructor(config: CarcaraConfig = {}) {
     const baseUrl = config.baseUrl || CARCARA_BASE_URL;
     const domain = config.domain || DEFAULT_DOMAIN;
-    
+
     this.config = {
       baseUrl,
       apiBaseUrl: config.apiBaseUrl || `${baseUrl}${SERVICE_PATH}`,
@@ -237,8 +209,9 @@ export class CarcaraClient {
     this.recorder = new LoginRecorder();
   }
 
+  // UMA unica instancia Axios com interceptor de cookies
   private createAxiosInstance(): AxiosInstance {
-    return axios.create({
+    const instance = axios.create({
       baseURL: this.config.baseUrl,
       headers: {
         'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36',
@@ -252,32 +225,62 @@ export class CarcaraClient {
       maxRedirects: 5,
       validateStatus: () => true,
     });
+
+    // Interceptor injeta cookies automaticamente
+    instance.interceptors.request.use(async (cfg: InternalAxiosRequestConfig) => {
+      if (!cfg.headers) cfg.headers = new axios.AxiosHeaders();
+      const cookies = await this.getCookieString();
+      if (cookies) {
+        cfg.headers.set('Cookie', cookies);
+      }
+      return cfg;
+    });
+
+    return instance;
+  }
+
+  // Cache de cookie string (invalidado a cada 5s ou quando muda)
+  private async getCookieString(): Promise<string> {
+    if (!this.context || this.page?.isClosed()) return this.cookieStringCache;
+
+    const now = Date.now();
+    if (now - this.cookieStringCacheTime < 5000 && this.cookieStringCache) {
+      return this.cookieStringCache;
+    }
+
+    const cookies = await this.context.cookies([this.config.baseUrl]);
+    this.cookieStringCache = cookies.map(c => `${c.name}=${c.value}`).join('; ');
+    this.cookieStringCacheTime = now;
+    return this.cookieStringCache;
+  }
+
+  private invalidateCookieCache(): void {
+    this.cookieStringCache = '';
+    this.cookieStringCacheTime = 0;
   }
 
   // ==========================================================================
-  // INICIALIZAÇÃO
+  // INICIALIZACAO
   // ==========================================================================
 
   async init(): Promise<void> {
     if (this.isInitialized) {
-      console.log('ℹ️ Cliente já inicializado');
+      logger.info('Cliente ja inicializado');
       return;
     }
 
-    console.log('🚀 Iniciando Carcara Client...');
-    console.log(`   URL: ${this.config.baseUrl}`);
-    console.log(`   Domínio: ${this.config.domain}`);
+    logger.info({ url: this.config.baseUrl, domain: this.config.domain }, 'Iniciando Carcara Client');
 
     try {
       await this.launchBrowser();
       await this.handleAuthentication();
       await this.navigateToService();
       await this.fetchModels();
-      
+
       this.isInitialized = true;
-      console.log('✅ Carcara Client inicializado com sucesso!');
-    } catch (error) {
-      console.error('❌ Falha na inicialização:', error);
+      logger.info('Carcara Client inicializado com sucesso');
+    } catch (error: any) {
+      logger.error({ error: error.message }, 'Falha na inicializacao');
       await this.cleanup();
       throw error;
     }
@@ -291,91 +294,84 @@ export class CarcaraClient {
   // NAVEGADOR
   // ==========================================================================
 
-  // Helper para parse seguro
   public tryParseJSON(text: string): any {
     try { return JSON.parse(text); } catch { return text; }
   }
 
   private async launchBrowser(): Promise<void> {
-    console.log('🌐 Iniciando navegador em modo silencioso...');
-    
-    this.browser = await chromium.launch({ 
+    logger.info('Iniciando navegador em modo silencioso');
+
+    this.browser = await chromium.launch({
       headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--disable-background-timer-throttling',
+        '--disable-backgrounding-occluded-windows',
+        '--disable-renderer-backgrounding',
+      ],
     });
-    
+
     this.context = await this.browser.newContext({
       viewport: { width: 1280, height: 720 },
       userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
     });
-    
+
     this.page = await this.context.newPage();
     this.page.setDefaultTimeout(TIMEOUT_NAVIGATION);
 
-    // ==========================================
-    // INTERCEPTA TRÁFEGO DO CHAT
-    // ==========================================
+    // Intercepta trafego do chat (async, nao bloqueante)
     this.page.on('response', async (response) => {
       const url = response.url();
-      
-      // Só intercepta chamadas de chat
       if (url.includes('/v1/chat/completions') && response.request().method() === 'POST') {
-        try {
-          const requestBody = response.request().postData();
-          const responseBody = await response.text();
-          
-          // Salva em arquivo
-          const chatDir = path.join(process.cwd(), '.carcara', 'chats');
-          if (!fs.existsSync(chatDir)) fs.mkdirSync(chatDir, { recursive: true });
-          
-          const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-          const fileName = `traffic_${timestamp}.json`;
-          const filePath = path.join(chatDir, fileName);
-          
-          const data = {
-            timestamp: new Date().toISOString(),
-            url: url,
-            status: response.status(),
-            request: requestBody ? JSON.parse(requestBody) : null,
-            response: this.tryParseJSON(responseBody),
-          };
-          
-          fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf-8');
-          console.log(`📡 Tráfego salvo: ${fileName}`);
-        } catch (e) {
-          // Silencioso - não quebra o fluxo
-        }
+        this.saveTraffic(response).catch(() => {});
       }
     });
-    
-    console.log('✅ Navegador iniciado em background');
+
+    logger.info('Navegador iniciado');
+  }
+
+  private async saveTraffic(response: any): Promise<void> {
+    try {
+      const requestBody = response.request().postData();
+      const responseBody = await response.text();
+      const chatDir = path.join(process.cwd(), '.carcara', 'chats');
+      await fs.mkdir(chatDir, { recursive: true });
+
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const filePath = path.join(chatDir, `traffic_${timestamp}.json`);
+
+      const data = {
+        timestamp: new Date().toISOString(),
+        url,
+        status: response.status(),
+        request: requestBody ? this.tryParseJSON(requestBody) : null,
+        response: this.tryParseJSON(responseBody),
+      };
+
+      await fs.writeFile(filePath, JSON.stringify(data, null, 2), 'utf-8');
+      logger.info({ file: `traffic_${timestamp}.json` }, 'Trafego salvo');
+    } catch {
+      // Silencioso
+    }
   }
 
   private async navigateToService(): Promise<void> {
-    console.log('🔗 Navegando para /service/ para inicializar sessão...');
-    
-    const serviceUrl = `${this.config.baseUrl}${SERVICE_PATH}/`;
-    
-    if (this.authToken) {
-      await this.page!.goto(`${serviceUrl}?token=${this.authToken}`, {
-        waitUntil: 'networkidle',
-        timeout: TIMEOUT_NAVIGATION,
-      });
-    } else {
-      await this.page!.goto(serviceUrl, {
-        waitUntil: 'networkidle',
-        timeout: TIMEOUT_NAVIGATION,
-      });
-    }
+    logger.info('Navegando para /service/');
 
+    const serviceUrl = `${this.config.baseUrl}${SERVICE_PATH}/`;
+    const url = this.authToken ? `${serviceUrl}?token=${this.authToken}` : serviceUrl;
+
+    await this.page!.goto(url, { waitUntil: 'networkidle', timeout: TIMEOUT_NAVIGATION });
     await this.page!.waitForTimeout(3000);
 
     const cookies = await this.context!.cookies([this.config.baseUrl]);
-    const carcareAuthCookie = cookies.find(c => c.name === 'carcara_auth');
-    
-    if (carcareAuthCookie) {
-      this.carcareAuth = carcareAuthCookie.value;
-      console.log(`🔑 carcara_auth: ${this.carcareAuth.substring(0, 15)}...`);
+    const carcaraAuthCookie = cookies.find(c => c.name === 'carcara_auth');
+    if (carcaraAuthCookie) {
+      this.carcaraAuth = carcaraAuthCookie.value;
+      logger.info({ auth: this.carcaraAuth.slice(0, 15) }, 'carcara_auth obtido');
     }
 
     const phpsessidCookie = cookies.find(c => c.name === 'PHPSESSID');
@@ -383,43 +379,41 @@ export class CarcaraClient {
       this.phpsessid = phpsessidCookie.value;
     }
 
+    this.invalidateCookieCache();
     await this.recorder.saveSession(this.page!, this.authToken || undefined);
   }
 
   // ==========================================================================
-  // AUTENTICAÇÃO (mantida igual)
+  // AUTENTICACAO
   // ==========================================================================
 
   private async handleAuthentication(): Promise<void> {
-    console.log('🔍 Verificando sessão salva...');
+    logger.info('Verificando sessao salva');
     const restoredSession = await this.recorder.restoreSession(this.page!);
-    
+
     if (restoredSession) {
       this.phpsessid = restoredSession.phpsessid || null;
       this.authToken = restoredSession.token || null;
-      this.carcareAuth = (restoredSession as any).carcaraAuth || null;
-      
+      this.carcaraAuth = (restoredSession as any).carcaraAuth || null;
+      this.invalidateCookieCache();
+
       const currentUrl = this.page!.url();
       if (!currentUrl.includes('/login')) {
-        console.log('✅ Sessão restaurada com sucesso!');
+        logger.info('Sessao restaurada com sucesso');
         return;
       }
-      
-      console.log('⚠️ Sessão expirada, precisa fazer login novamente');
+      logger.warn('Sessao expirada, refazendo login');
     }
 
     const envConfig = this.getEnvConfig();
-    
     if (envConfig) {
-      console.log('🔐 Tentando login via API...');
+      logger.info('Tentando login via API');
       const apiLoginSuccess = await this.apiLogin(envConfig.username, envConfig.password);
-      
       if (apiLoginSuccess) {
-        console.log('✅ Login via API realizado com sucesso!');
+        logger.info('Login via API realizado');
         return;
       }
-      
-      console.log('⚠️ Login via API falhou, tentando via navegador...');
+      logger.warn('Login via API falhou, tentando navegador');
     }
 
     await this.browserLogin(envConfig);
@@ -427,21 +421,16 @@ export class CarcaraClient {
 
   private async apiLogin(username: string, password: string): Promise<boolean> {
     try {
-      console.log('📡 Enviando requisição de login via API...');
-      
-      await this.page!.goto(this.config.baseUrl, { 
-        waitUntil: 'networkidle',
-        timeout: TIMEOUT_NAVIGATION,
-      });
-      
+      logger.info('Enviando requisicao de login via API');
+
+      await this.page!.goto(this.config.baseUrl, { waitUntil: 'networkidle', timeout: TIMEOUT_NAVIGATION });
       await this.page!.waitForTimeout(2000);
-      
+
       const cookies = await this.context!.cookies([this.config.baseUrl]);
       const phpsessid = cookies.find(c => c.name === 'PHPSESSID')?.value;
-      
       if (phpsessid) {
         this.phpsessid = phpsessid;
-        console.log(`🔑 PHPSESSID: ${phpsessid.substring(0, 10)}...`);
+        logger.info({ sessid: phpsessid.slice(0, 10) }, 'PHPSESSID obtido');
       }
 
       const payload: LoginPayload = {
@@ -451,158 +440,124 @@ export class CarcaraClient {
         domain: this.config.domain,
       };
 
-      const response = await this.axiosInstance.post(
-        LOGIN_API,
-        payload,
-        {
-          headers: {
-            'Cookie': `PHPSESSID=${phpsessid}`,
-            'Content-Type': 'application/json;charset=UTF-8',
-            'Accept': 'application/json, text/plain, */*',
-          },
-          timeout: TIMEOUT_API,
-        }
-      );
+      const response = await this.axiosInstance.post(LOGIN_API, payload, {
+        headers: {
+          'Cookie': `PHPSESSID=${phpsessid}`,
+          'Content-Type': 'application/json;charset=UTF-8',
+        },
+        timeout: TIMEOUT_API,
+      });
 
-      console.log(`📥 Resposta: Status ${response.status}`);
+      logger.info({ status: response.status }, 'Resposta do login API');
 
       if (response.status === 200 && response.data?.status === 'OK') {
         await this.page!.waitForTimeout(2000);
         await this.page!.reload({ waitUntil: 'networkidle' });
         await this.page!.waitForTimeout(2000);
-        
+
         const updatedCookies = await this.context!.cookies([this.config.baseUrl]);
-        const carcareAuthCookie = updatedCookies.find(c => c.name === 'carcara_auth');
-        
-        if (carcareAuthCookie) {
-          this.carcareAuth = carcareAuthCookie.value;
-          console.log(`🔑 carcara_auth: ${this.carcareAuth.substring(0, 15)}...`);
+        const carcaraAuthCookie = updatedCookies.find(c => c.name === 'carcara_auth');
+        if (carcaraAuthCookie) {
+          this.carcaraAuth = carcaraAuthCookie.value;
+          logger.info({ auth: this.carcaraAuth.slice(0, 15) }, 'carcara_auth apos login');
         }
-        
-        const currentUrl = this.page!.url();
+
         try {
-          const urlObj = new URL(currentUrl);
+          const urlObj = new URL(this.page!.url());
           this.authToken = urlObj.searchParams.get('token') || null;
         } catch {}
 
+        this.invalidateCookieCache();
         await this.recorder.saveSession(this.page!, this.authToken || undefined);
         return true;
       }
-
       return false;
     } catch (error: any) {
-      console.error('❌ Erro na API de login:', error.message);
+      logger.error({ error: error.message }, 'Erro na API de login');
       return false;
     }
   }
 
   private async browserLogin(envConfig?: { username: string; password: string } | null): Promise<void> {
     if (envConfig) {
-      console.log('🤖 Tentando login automático via navegador...');
-      
+      logger.info('Tentando login automatico via navegador');
       const loginUrl = `${this.config.baseUrl}${LOGIN_PAGE}`;
       await this.page!.goto(loginUrl, { waitUntil: 'networkidle' });
-      
+
       await this.fillField(
         ['input[name="user"]', 'input[type="text"]', 'input[type="email"]'],
-        envConfig.username, 'usuário'
+        envConfig.username, 'usuario'
       );
-      
       await this.fillField(
         ['input[type="password"]', 'input[name="password"]'],
         envConfig.password, 'senha'
       );
-
       await this.clickSubmit();
       await this.page!.waitForTimeout(3000);
-      
+
       if (!this.isOnLoginPage()) {
+        this.invalidateCookieCache();
         await this.recorder.saveSession(this.page!);
         return;
       }
     }
 
-    console.log('\n👤 LOGIN MANUAL NECESSÁRIO');
-    console.log('═══════════════════════════════\n');
-
+    logger.info('Login manual necessario');
     if (!this.isOnLoginPage()) {
-      await this.page!.goto(`${this.config.baseUrl}${LOGIN_PAGE}`, {
-        waitUntil: 'networkidle',
-      });
+      await this.page!.goto(`${this.config.baseUrl}${LOGIN_PAGE}`, { waitUntil: 'networkidle' });
     }
-
-    await this.page!.waitForURL(
-      (url) => !url.toString().includes('/login'),
-      { timeout: 0 }
-    );
-
-    console.log('✅ Login manual detectado!');
+    await this.page!.waitForURL((url) => !url.toString().includes('/login'), { timeout: 0 });
+    logger.info('Login manual detectado');
+    this.invalidateCookieCache();
     await this.recorder.saveSession(this.page!);
     await this.saveCredentialsFromPage();
   }
 
   // ==========================================================================
-  // MODELOS
+  // MODELOS (com cache em memoria)
   // ==========================================================================
 
   private async fetchModels(): Promise<void> {
-    console.log('📋 Buscando modelos disponíveis...');
+    logger.info('Buscando modelos disponiveis');
 
-    const cachedModels = this.recorder.loadModelsCache();
-    if (cachedModels && cachedModels.length > 0) {
+    // Cache em memoria (1h)
+    if (Date.now() - this.modelsCacheTime < MODELS_CACHE_TTL && this.availableModels.length) {
+      logger.info({ count: this.availableModels.length }, 'Usando cache em memoria');
+      return;
+    }
+
+    // Cache em disco
+    const cachedModels = await this.recorder.loadModelsCache();
+    if (cachedModels?.length) {
       this.availableModels = cachedModels;
+      this.modelsCacheTime = Date.now();
       this.displayModels();
       return;
     }
 
     try {
-      const cookies = await this.context!.cookies([this.config.baseUrl]);
-      const cookieString = cookies.map(c => `${c.name}=${c.value}`).join('; ');
-
-      const modelsAxios = axios.create({
+      const response = await this.axiosInstance.get(MODELS_API, {
         baseURL: this.config.apiBaseUrl,
-        headers: {
-          'Cookie': cookieString,
-          'Accept': 'application/json',
-          'Content-Type': 'application/json',
-          'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36',
-          'Origin': this.config.baseUrl,
-          'Referer': `${this.config.baseUrl}${SERVICE_PATH}/`,
-        },
-        validateStatus: () => true,
+        timeout: TIMEOUT_API,
       });
-
-      const response = await modelsAxios.get<ModelsResponse>(
-        MODELS_API,
-        { timeout: TIMEOUT_API }
-      );
 
       if (response.status === 200 && response.data?.data) {
         this.availableModels = response.data.data;
-        this.recorder.saveModelsCache(this.availableModels);
-        console.log(`✅ ${this.availableModels.length} modelos disponíveis`);
+        this.modelsCacheTime = Date.now();
+        await this.recorder.saveModelsCache(this.availableModels);
+        logger.info({ count: this.availableModels.length }, 'Modelos carregados');
         this.displayModels();
       }
     } catch (error: any) {
-      console.warn('⚠️ Não foi possível buscar modelos:', error.message);
-      
-      try {
-        const cachePath = this.recorder.modelsPath;
-        if (fs.existsSync(cachePath)) {
-          const cache = JSON.parse(fs.readFileSync(cachePath, 'utf-8'));
-          this.availableModels = cache.models || [];
-          console.log(`📂 Usando cache com ${this.availableModels.length} modelos`);
-        }
-      } catch {}
+      logger.warn({ error: error.message }, 'Nao foi possivel buscar modelos');
     }
   }
 
   private displayModels(): void {
-    if (this.availableModels.length === 0) return;
-    
-    console.log('\n📋 Modelos disponíveis:');
-    this.availableModels.slice(0, 10).forEach(model => {
-      console.log(`   - ${model.id} (${(model as any).max_input_tokens || '?'} tokens)`);
+    if (!this.availableModels.length) return;
+    logger.info('Modelos disponiveis:');
+    this.availableModels.slice(0, 10).forEach(m => {
+      logger.info({ model: m.id, tokens: (m as any).max_input_tokens || '?' });
     });
   }
 
@@ -610,12 +565,8 @@ export class CarcaraClient {
     return this.availableModels;
   }
 
-  /** Retorna o primeiro modelo disponível */
   getDefaultModel(): string {
-    if (this.availableModels.length > 0) {
-      return this.availableModels[0].id;
-    }
-    return DEFAULT_MODEL;
+    return this.availableModels[0]?.id || DEFAULT_MODEL;
   }
 
   // ==========================================================================
@@ -627,7 +578,7 @@ export class CarcaraClient {
       const element = await this.page!.$(selector);
       if (element && await element.isVisible()) {
         await element.fill(value);
-        console.log(`   ✓ ${fieldName} preenchido`);
+        logger.info({ field: fieldName }, 'Campo preenchido');
         return true;
       }
     }
@@ -641,12 +592,11 @@ export class CarcaraClient {
       'button:has-text("Login")',
       'button:has-text("Entrar")',
     ];
-
     for (const selector of selectors) {
       const button = await this.page!.$(selector);
       if (button && await button.isVisible()) {
         await button.click();
-        console.log('   ✓ Botão de login clicado');
+        logger.info('Botao de login clicado');
         return;
       }
     }
@@ -665,67 +615,56 @@ export class CarcaraClient {
         'input:not([type="password"])',
         (el: HTMLInputElement) => el.value
       ).catch(() => null);
-
       const password = await this.page!.$eval(
         'input[type="password"]',
         (el: HTMLInputElement) => el.value
       ).catch(() => null);
 
       if (username && password) {
-        this.updateEnvFile(username, password);
+        await this.updateEnvFile(username, password);
       }
     } catch {}
   }
 
-  private updateEnvFile(username: string, password: string): void {
+  private async updateEnvFile(username: string, password: string): Promise<void> {
     const envPath = path.join(process.cwd(), '.env');
     let content = '';
-
-    try { content = fs.readFileSync(envPath, 'utf-8'); } catch {}
+    try { content = await fs.readFile(envPath, 'utf-8'); } catch {}
 
     const updates: Record<string, string> = {
       [ENV_USER]: username,
       [ENV_PASS]: password,
     };
 
-    Object.entries(updates).forEach(([key, value]) => {
+    for (const [key, value] of Object.entries(updates)) {
       const regex = new RegExp(`^${key}=.*`, 'm');
       if (regex.test(content)) {
         content = content.replace(regex, `${key}=${value}`);
       } else {
-        content += content ? `\n${key}=${value}` : `${key}=${value}`;
+        content += content ? `\\n${key}=${value}` : `${key}=${value}`;
       }
-    });
-
-    if (!content.includes('CARCARA_URL=')) {
-      content += `\nCARCARA_URL=${this.config.baseUrl}`;
     }
 
-    fs.writeFileSync(envPath, content.trim() + '\n', 'utf-8');
-    console.log('💾 Credenciais salvas no .env');
-    dotenv.config();
+    if (!content.includes('CARCARA_URL=')) {
+      content += `\\nCARCARA_URL=${this.config.baseUrl}`;
+    }
+
+    await fs.writeFile(envPath, content.trim() + '\\n', 'utf-8');
+    logger.info('Credenciais salvas no .env');
   }
 
   private isOnLoginPage(): boolean {
-    if (!this.page) return true;
-    return this.page.url().includes('/login');
-  }
-
-  private getCookieString(): Promise<string> {
-    return this.context!.cookies([this.config.baseUrl]).then(
-      cookies => cookies.map(c => `${c.name}=${c.value}`).join('; ')
-    );
+    return this.page?.url().includes('/login') ?? true;
   }
 
   // ==========================================================================
-  // INDEXEDDB (COMPATÍVEL COM LlamaUI)
+  // INDEXEDDB (mantido - necessario para LlamaUI)
   // ==========================================================================
 
-  private async executeInBrowser<T>(fn: string, arg?: any): Promise<T> {
+  private async executeInBrowser(fn: string, arg?: any): Promise<any> {
     if (!this.page || this.page.isClosed()) {
-      throw new Error('Página não disponível');
+      throw new Error('Pagina nao disponivel');
     }
-
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       try {
         return await this.page.evaluate(fn, arg);
@@ -737,13 +676,13 @@ export class CarcaraClient {
         throw error;
       }
     }
-    throw new Error('Falha na execução no browser');
+    throw new Error('Falha na execucao no browser');
   }
 
   async getConversations(): Promise<ConversationNode[]> {
     this.ensureInitialized();
     try {
-      const result = await this.executeInBrowser<ConversationNode[]>(`
+      const result = await this.executeInBrowser(`
         async () => {
           return new Promise((resolve, reject) => {
             const request = indexedDB.open('${DB_NAME}');
@@ -766,15 +705,15 @@ export class CarcaraClient {
         }
       `);
       return Array.isArray(result) ? result : [];
-    } catch (error) {
-      console.error('Erro ao buscar conversas:', error);
+    } catch (error: any) {
+      logger.error({ error: error.message }, 'Erro ao buscar conversas');
       return [];
     }
   }
 
   async saveConversation(conversation: ConversationNode): Promise<void> {
     this.ensureInitialized();
-    await this.executeInBrowser<void>(`
+    await this.executeInBrowser(`
       async (conversation) => {
         return new Promise((resolve, reject) => {
           const request = indexedDB.open('${DB_NAME}');
@@ -799,7 +738,7 @@ export class CarcaraClient {
 
   async getConversationMessages(convId: string): Promise<LlamaMessage[]> {
     this.ensureInitialized();
-    return this.executeInBrowser<LlamaMessage[]>(`
+    return this.executeInBrowser(`
       async (convId) => {
         return new Promise((resolve, reject) => {
           const request = indexedDB.open('${DB_NAME}');
@@ -831,7 +770,7 @@ export class CarcaraClient {
 
   async saveMessage(message: LlamaMessage): Promise<void> {
     this.ensureInitialized();
-    await this.executeInBrowser<void>(`
+    await this.executeInBrowser(`
       async (msg) => {
         return new Promise((resolve, reject) => {
           const request = indexedDB.open('${DB_NAME}');
@@ -857,25 +796,18 @@ export class CarcaraClient {
 
   async saveConversationToFile(convId: string): Promise<string> {
     this.ensureInitialized();
-    
     const conversations = await this.getConversations();
     const conv = conversations.find(c => c.id === convId);
-    if (!conv) throw new Error('Conversa não encontrada');
-    
+    if (!conv) throw new Error('Conversa nao encontrada');
+
     const messages = await this.getConversationMessages(convId);
-    
-    // Cria diretório
     const chatDir = path.join(process.cwd(), '.carcara', 'chats');
-    if (!fs.existsSync(chatDir)) {
-      fs.mkdirSync(chatDir, { recursive: true });
-    }
-    
-    // Nome do arquivo: nome_da_conversa_UUID.json
+    await fs.mkdir(chatDir, { recursive: true });
+
     const safeName = conv.name.replace(/[^a-zA-Z0-9]/g, '_').substring(0, 50);
     const fileName = `${safeName}_${convId.substring(0, 8)}.json`;
     const filePath = path.join(chatDir, fileName);
-    
-    // Formato legível
+
     const data = {
       conversa: {
         id: conv.id,
@@ -890,14 +822,14 @@ export class CarcaraClient {
         data: new Date(m.timestamp).toISOString(),
       })),
     };
-    
-    fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf-8');
-    console.log(`💾 Conversa salva: ${filePath}`);
+
+    await fs.writeFile(filePath, JSON.stringify(data, null, 2), 'utf-8');
+    logger.info({ file: filePath }, 'Conversa salva');
     return filePath;
   }
 
   // ==========================================================================
-  // CHAT E MCP (ATUALIZADO COM ESTRUTURA REAL DO LlamaUI)
+  // CHAT E MCP
   // ==========================================================================
 
   async createNewConversation(
@@ -905,7 +837,6 @@ export class CarcaraClient {
     model?: string
   ): Promise<string> {
     this.ensureInitialized();
-    
     const id = crypto.randomUUID ? crypto.randomUUID() : `conv_${Date.now()}`;
     const conversation: ConversationNode = {
       id,
@@ -916,7 +847,6 @@ export class CarcaraClient {
       thinkingEnabled: false,
     };
 
-    // Cria mensagem system (root) - igual ao LlamaUI
     const systemMsg: LlamaMessage = {
       id: crypto.randomUUID ? crypto.randomUUID() : `msg_${Date.now()}`,
       convId: id,
@@ -930,7 +860,7 @@ export class CarcaraClient {
     await this.saveConversation(conversation);
     await this.saveMessage(systemMsg);
     this.currentConversationId = id;
-    console.log(`📝 Conversa criada: ${title} [${id}]`);
+    logger.info({ id, title }, 'Conversa criada');
     return id;
   }
 
@@ -940,15 +870,12 @@ export class CarcaraClient {
     tools?: any[]
   ): Promise<ChatCompletionResponse> {
     this.ensureInitialized();
-    
     if (!this.currentConversationId) {
       await this.createNewConversation();
     }
 
     const modelToUse = model || this.getDefaultModel();
-    const cookieString = await this.getCookieString();
 
-    // Salva mensagem do usuário no IndexedDB
     const userMsg: LlamaMessage = {
       id: crypto.randomUUID ? crypto.randomUUID() : `msg_${Date.now()}`,
       convId: this.currentConversationId!,
@@ -960,7 +887,6 @@ export class CarcaraClient {
     };
     await this.saveMessage(userMsg);
 
-    // Payload igual ao Carcara real
     const payload: any = {
       model: modelToUse,
       messages: [{ role: 'user', content: prompt }],
@@ -974,32 +900,17 @@ export class CarcaraClient {
       backend_sampling: false,
       timings_per_token: false,
     };
-
     if (tools?.length) payload.tools = tools;
 
-    console.log(`💬 Enviando para ${modelToUse}...`);
+    logger.info({ model: modelToUse }, 'Enviando para modelo');
 
-    const chatAxios = axios.create({
+    const response = await this.axiosInstance.post(CHAT_API, payload, {
       baseURL: this.config.apiBaseUrl,
-      headers: {
-        'Cookie': cookieString,
-        'Accept': '*/*',
-        'Content-Type': 'application/json',
-        'Origin': this.config.baseUrl,
-        'Referer': `${this.config.baseUrl}${SERVICE_PATH}/?token=${this.authToken || ''}`,
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-      },
+      timeout: TIMEOUT_CHAT,
     });
 
-    const response = await chatAxios.post<ChatCompletionResponse>(
-      CHAT_API,
-      payload,
-      { timeout: TIMEOUT_CHAT }
-    );
-
     const choice = response.data.choices[0];
-    
-    // Salva resposta do assistente
+
     const assistantMsg: LlamaMessage = {
       id: crypto.randomUUID ? crypto.randomUUID() : `msg_${Date.now()}`,
       convId: this.currentConversationId!,
@@ -1011,7 +922,6 @@ export class CarcaraClient {
     };
     await this.saveMessage(assistantMsg);
 
-    // Atualiza currNode da conversa
     const conversations = await this.getConversations();
     const conv = conversations.find(c => c.id === this.currentConversationId);
     if (conv) {
@@ -1020,61 +930,46 @@ export class CarcaraClient {
       await this.saveConversation(conv);
     }
 
-    // ==========================================
-    // SALVA EM ARQUIVO (sempre funciona)
-    // ==========================================
+    // Salva em arquivo (async)
     try {
       const chatDir = path.join(process.cwd(), '.carcara', 'chats');
-      if (!fs.existsSync(chatDir)) fs.mkdirSync(chatDir, { recursive: true });
-      
+      await fs.mkdir(chatDir, { recursive: true });
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-      const fileName = `chat_${timestamp}.json`;
-      const filePath = path.join(chatDir, fileName);
-      
-      const data = {
+      const filePath = path.join(chatDir, `chat_${timestamp}.json`);
+      await fs.writeFile(filePath, JSON.stringify({
         timestamp: new Date().toISOString(),
         conversationId: this.currentConversationId,
         model: modelToUse,
-        prompt: prompt,
+        prompt,
         response: choice.message.content,
         toolCalls: choice.message.tool_calls || null,
-      };
-      
-      fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf-8');
-      console.log(`💾 Chat salvo: ${fileName}`);
+      }, null, 2), 'utf-8');
+      logger.info({ file: `chat_${timestamp}.json` }, 'Chat salvo');
     } catch (e: any) {
-      console.log(`⚠️ Erro ao salvar arquivo: ${e.message}`);
+      logger.warn({ error: e.message }, 'Erro ao salvar arquivo');
     }
 
-    console.log('✅ Resposta salva no IndexedDB');
+    logger.info('Resposta salva no IndexedDB');
     return response.data;
   }
 
   async callMcpTool(serverId: string, method: string, params: any = {}): Promise<any> {
     this.ensureInitialized();
-    const cookieString = await this.getCookieString();
-
-    const mcpAxios = axios.create({
-      baseURL: this.config.apiBaseUrl,
-      headers: { 'Cookie': cookieString, 'Content-Type': 'application/json' },
-    });
-
-    const response = await mcpAxios.post(
+    const response = await this.axiosInstance.post(
       `${MCP_API}/${serverId}`,
       { jsonrpc: '2.0', id: 1, method, params }
     );
-
     return response.data;
   }
 
   async listSdumontTools(): Promise<MCPListResponse | null> {
     try {
-      console.log('🛠️ Listando ferramentas MCP...');
+      logger.info('Listando ferramentas MCP');
       const result = await this.callMcpTool('lncc-sdumont', 'tools/list', {});
-      console.log(`✅ ${result.result?.tools?.length || 0} ferramentas encontradas`);
+      logger.info({ count: result.result?.tools?.length || 0 }, 'Ferramentas encontradas');
       return result as MCPListResponse;
     } catch (error: any) {
-      console.warn('⚠️ Não foi possível listar ferramentas:', error.message);
+      logger.warn({ error: error.message }, 'Nao foi possivel listar ferramentas');
       return null;
     }
   }
@@ -1086,7 +981,7 @@ export class CarcaraClient {
   private async cleanup(): Promise<void> {
     if (this.browser) {
       await this.browser.close();
-      console.log('🛑 Navegador fechado');
+      logger.info('Navegador fechado');
     }
     this.browser = null;
     this.context = null;
@@ -1096,7 +991,7 @@ export class CarcaraClient {
 
   private ensureInitialized(): void {
     if (!this.isInitialized || !this.page) {
-      throw new Error('Cliente não inicializado. Execute init() primeiro.');
+      throw new Error('Cliente nao inicializado. Execute init() primeiro.');
     }
   }
 
