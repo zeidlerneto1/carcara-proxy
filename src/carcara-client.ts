@@ -33,7 +33,7 @@ const DEFAULT_DOMAIN = 'LNCC';
 const DEFAULT_MODEL = 'Qwen3.6-35B';
 const DEFAULT_TITLE = 'Nova Conversa LNCC';
 const DEFAULT_TEMPERATURE = 0.5;
-const DEFAULT_MAX_TOKENS = 4096;
+const DEFAULT_MAX_TOKENS = parseInt(process.env.MAX_OUTPUT_TOKENS || "4096", 10);
 
 const ENV_USER = 'LNCC_USER';
 const ENV_PASS = 'LNCC_PASS';
@@ -957,23 +957,31 @@ export class CarcaraClient {
       await this.saveConversation(conv);
     }
 
-    // Salva em arquivo (async)
+    // Salva em arquivo unico por conversa (append, nao sobrescreve)
     try {
       const chatDir = path.join(process.cwd(), '.carcara', 'chats');
       await fs.mkdir(chatDir, { recursive: true });
-      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-      const filePath = path.join(chatDir, `chat_${timestamp}.json`);
-      await fs.writeFile(filePath, JSON.stringify({
+      const filePath = path.join(chatDir, `${convId}.jsonl`);
+
+      const entry = JSON.stringify({
         timestamp: new Date().toISOString(),
-        conversationId: convId,
         model: modelToUse,
-        prompt,
-        response: choice.message.content,
+        role: 'user',
+        content: prompt,
+      }) + '\n';
+
+      const responseEntry = JSON.stringify({
+        timestamp: new Date().toISOString(),
+        model: modelToUse,
+        role: 'assistant',
+        content: choice.message.content,
         toolCalls: choice.message.tool_calls || null,
         completionId: response.data.id,
         timings: choice.timings || response.data.timings,
-      }, null, 2), 'utf-8');
-      logger.info({ file: `chat_${timestamp}.json` }, 'Chat salvo');
+      }) + '\n';
+
+      await fs.appendFile(filePath, entry + responseEntry, 'utf-8');
+      logger.info({ file: `${convId}.jsonl` }, 'Mensagens appendadas');
     } catch (e: any) {
       logger.warn({ error: e.message }, 'Erro ao salvar arquivo');
     }
