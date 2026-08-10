@@ -421,6 +421,30 @@ export class CarcaraRouter {
     });
 
 
+
+    // ==========================================
+    // ARVORE DE MENSAGENS (parent/children)
+    // ==========================================
+
+    this.app.get('/api/conversations/:id/tree', async (req: Request, res: Response) => {
+      try {
+        const messages = await this.client.getMessageTree(req.params.id);
+        res.json({ conversationId: req.params.id, messages });
+      } catch (error: any) {
+        res.status(500).json({ error: error.message });
+      }
+    });
+
+    this.app.get('/api/messages/:msgId', async (req: Request, res: Response) => {
+      try {
+        const msg = await this.client.getMessageById(req.params.msgId);
+        if (!msg) return res.status(404).json({ error: 'Message not found' });
+        res.json(msg);
+      } catch (error: any) {
+        res.status(500).json({ error: error.message });
+      }
+    });
+
     // ==========================================
     // LLAMAUI CONFIG (localStorage)
     // ==========================================

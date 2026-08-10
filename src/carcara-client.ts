@@ -24,6 +24,8 @@ const CHAT_API = '/v1/chat/completions';
 const MCP_API = '/mcp';
 
 const DB_NAME = 'LlamaUi';
+const DB_NAME_LEGACY = 'LlamacppWebui';
+const DB_NAMES = [DB_NAME, DB_NAME_LEGACY];
 const DB_STORE_CONVERSATIONS = 'conversations';
 const DB_STORE_MESSAGES = 'messages';
 
@@ -846,7 +848,6 @@ export class CarcaraClient {
       name: title,
       currNode: id,
       lastModified: Date.now(),
-      mcpServerOverrides: [{ serverId: 'lncc-sdumont', enabled: true }],
       thinkingEnabled: false,
     };
 
@@ -878,17 +879,31 @@ export class CarcaraClient {
     }
 
     const modelToUse = model || this.getDefaultModel();
+    const convId = this.currentConversationId!;
 
+    // Busca conversa para saber o currNode (última mensagem ativa)
+    const conversations = await this.getConversations();
+    const conv = conversations.find(c => c.id === convId);
+    const parentId = conv?.currNode || null;
+
+    // Cria mensagem do usuário
+    const userMsgId = crypto.randomUUID ? crypto.randomUUID() : `msg_${Date.now()}`;
     const userMsg: LlamaMessage = {
-      id: crypto.randomUUID ? crypto.randomUUID() : `msg_${Date.now()}`,
-      convId: this.currentConversationId!,
+      id: userMsgId,
+      convId,
       role: 'user',
       type: 'text',
       content: prompt,
+      parent: parentId,
       children: [],
       timestamp: Date.now(),
     };
     await this.saveMessage(userMsg);
+
+    // Atualiza parent (adiciona este userMsg aos children do pai)
+    if (parentId) {
+      await this.addChildToMessage(parentId, userMsgId);
+    }
 
     const payload: any = {
       model: modelToUse,
@@ -914,21 +929,30 @@ export class CarcaraClient {
 
     const choice = response.data.choices[0];
 
+    // Cria mensagem do assistant com dados reais do modelo
+    const assistantMsgId = crypto.randomUUID ? crypto.randomUUID() : `msg_${Date.now()}`;
     const assistantMsg: LlamaMessage = {
-      id: crypto.randomUUID ? crypto.randomUUID() : `msg_${Date.now()}`,
-      convId: this.currentConversationId!,
+      id: assistantMsgId,
+      convId,
       role: 'assistant',
       type: 'text',
       content: choice.message.content || '',
+      parent: userMsgId,
       children: [],
       timestamp: Date.now(),
+      model: modelToUse,
+      completionId: response.data.id || '',
+      timings: choice.timings || response.data.timings,
+      toolCalls: choice.message.tool_calls ? JSON.stringify(choice.message.tool_calls) : '',
     };
     await this.saveMessage(assistantMsg);
 
-    const conversations = await this.getConversations();
-    const conv = conversations.find(c => c.id === this.currentConversationId);
+    // Atualiza userMsg (adiciona assistant como filho)
+    await this.addChildToMessage(userMsgId, assistantMsgId);
+
+    // Atualiza conversa: currNode aponta para a resposta do assistant
     if (conv) {
-      conv.currNode = assistantMsg.id;
+      conv.currNode = assistantMsgId;
       conv.lastModified = Date.now();
       await this.saveConversation(conv);
     }
@@ -941,11 +965,13 @@ export class CarcaraClient {
       const filePath = path.join(chatDir, `chat_${timestamp}.json`);
       await fs.writeFile(filePath, JSON.stringify({
         timestamp: new Date().toISOString(),
-        conversationId: this.currentConversationId,
+        conversationId: convId,
         model: modelToUse,
         prompt,
         response: choice.message.content,
         toolCalls: choice.message.tool_calls || null,
+        completionId: response.data.id,
+        timings: choice.timings || response.data.timings,
       }, null, 2), 'utf-8');
       logger.info({ file: `chat_${timestamp}.json` }, 'Chat salvo');
     } catch (e: any) {
@@ -954,6 +980,69 @@ export class CarcaraClient {
 
     logger.info('Resposta salva no IndexedDB');
     return response.data;
+  }
+
+  // ==========================================================================
+  // MANIPULAÇÃO DE ÁRVORE (parent/children)
+  // ==========================================================================
+
+  async addChildToMessage(parentId: string | number, childId: string | number): Promise<void> {
+    this.ensureInitialized();
+    await this.executeInBrowser(`
+      async (args) => {
+        const [parentId, childId] = args;
+        return new Promise((resolve, reject) => {
+          const request = indexedDB.open('${DB_NAME}');
+          request.onerror = () => reject(request.error);
+          request.onsuccess = () => {
+            const db = request.result;
+            const tx = db.transaction('${DB_STORE_MESSAGES}', 'readwrite');
+            const store = tx.objectStore('${DB_STORE_MESSAGES}');
+            const getReq = store.get(parentId);
+            getReq.onsuccess = () => {
+              const msg = getReq.result;
+              if (msg) {
+                if (!msg.children) msg.children = [];
+                if (!msg.children.includes(childId)) {
+                  msg.children.push(childId);
+                  store.put(msg);
+                }
+              }
+              resolve();
+            };
+            getReq.onerror = () => reject(getReq.error);
+          };
+        });
+      }
+    `, [parentId, childId]);
+  }
+
+  async getMessageTree(convId: string): Promise<LlamaMessage[]> {
+    this.ensureInitialized();
+    const messages = await this.getConversationMessages(convId);
+    // Ordena por timestamp mas mantém estrutura de árvore
+    return messages.sort((a, b) => a.timestamp - b.timestamp);
+  }
+
+  async getMessageById(msgId: string | number): Promise<LlamaMessage | null> {
+    this.ensureInitialized();
+    const result = await this.executeInBrowser(`
+      async (msgId) => {
+        return new Promise((resolve, reject) => {
+          const request = indexedDB.open('${DB_NAME}');
+          request.onerror = () => reject(request.error);
+          request.onsuccess = () => {
+            const db = request.result;
+            const tx = db.transaction('${DB_STORE_MESSAGES}', 'readonly');
+            const store = tx.objectStore('${DB_STORE_MESSAGES}');
+            const getReq = store.get(msgId);
+            getReq.onsuccess = () => resolve(getReq.result || null);
+            getReq.onerror = () => reject(getReq.error);
+          };
+        });
+      }
+    `, msgId);
+    return result as LlamaMessage | null;
   }
 
   async callMcpTool(serverId: string, method: string, params: any = {}): Promise<any> {

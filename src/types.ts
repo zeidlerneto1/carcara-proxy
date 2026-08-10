@@ -4,25 +4,52 @@ export interface CarcaraConfig {
   apiBaseUrl?: string;
 }
 
+// ============================================================================
+// INDEXEDDB - Estrutura real do LlamaUI (baseado no dump)
+// ============================================================================
+
 export interface LlamaMessage {
-  id: string;
+  id: string | number;
   convId: string;
   role: 'system' | 'user' | 'assistant';
   type: 'root' | 'text';
   content: string;
-  parent?: string;
-  children: string[];
+  parent: string | number | null;
+  children: (string | number)[];
   timestamp: number;
+  // Campos do assistant
+  toolCalls?: string;           // string no dump real (não array!)
+  model?: string;               // ex: "DeepSeek-v4-Flash-0731"
+  completionId?: string;        // ex: "chatcmpl-..."
+  timings?: MessageTimings;
+  // Campos do user
+  extra?: any[];
+}
+
+export interface MessageTimings {
+  cache_n: number;
+  prompt_n: number;
+  prompt_ms: number;
+  prompt_per_token_ms: number;
+  prompt_per_second: number;
+  predicted_n: number;
+  predicted_ms: number;
+  predicted_per_token_ms: number;
+  predicted_per_second: number;
 }
 
 export interface ConversationNode {
   id: string;
   name: string;
   lastModified: number;
-  currNode: string;
-  mcpServerOverrides: Array<{ serverId: string; enabled: boolean }>;
-  thinkingEnabled: boolean;
+  currNode: string | number;
+  thinkingEnabled?: boolean;
+  // NOTA: mcpServerOverrides NAO está no IndexedDB, está no localStorage
 }
+
+// ============================================================================
+// API RESPONSES
+// ============================================================================
 
 export interface ChatCompletionResponse {
   id: string;
@@ -66,6 +93,10 @@ export interface MCPListResponse {
   };
 }
 
+// ============================================================================
+// LOGIN
+// ============================================================================
+
 export interface LoginPayload {
   action: 'login';
   user: string;
@@ -85,6 +116,10 @@ export interface LoginResponse {
   };
 }
 
+// ============================================================================
+// MODELOS
+// ============================================================================
+
 export interface ModelInfo {
   id: string;
   name?: string;
@@ -96,6 +131,10 @@ export interface ModelInfo {
 export interface ModelsResponse {
   data: ModelInfo[];
 }
+
+// ============================================================================
+// LOGIN RECORDER
+// ============================================================================
 
 export interface LoginStep {
   type: 'navigate' | 'click' | 'fill' | 'wait' | 'select' | 'press' | 'api_request';
@@ -143,6 +182,10 @@ export interface StoredSession {
   timestamp: number;
 }
 
+// ============================================================================
+// CHAT / MCP
+// ============================================================================
+
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
   content: string;
@@ -167,4 +210,67 @@ export interface SearchResult {
   snippet: string;
   url: string;
   source: string;
+}
+
+// ============================================================================
+// LLAMAUI CONFIG (localStorage)
+// ============================================================================
+
+export interface LlamaUIConfig {
+  theme?: string;
+  apiKey?: string;
+  systemMessage?: string;
+  pasteLongTextToFileLen?: number;
+  sendOnEnter?: boolean;
+  copyTextAttachmentsAsPlainText?: boolean;
+  enableContinueGeneration?: boolean;
+  pdfAsImage?: boolean;
+  askForTitleConfirmation?: boolean;
+  titleGenerationUseFirstLine?: boolean;
+  titleGenerationUseLLM?: boolean;
+  titleGenerationPrompt?: string;
+  maxImageMPixels?: number;
+  showMessageStats?: boolean;
+  showThoughtInProgress?: boolean;
+  showToolCallInProgress?: boolean;
+  keepStatsVisible?: boolean;
+  autoMicOnEmpty?: boolean;
+  renderUserContentAsMarkdown?: boolean;
+  fullHeightCodeBlocks?: boolean;
+  disableAutoScroll?: boolean;
+  alwaysShowSidebarOnDesktop?: boolean;
+  showRawModelNames?: boolean;
+  showModelQuantization?: boolean;
+  showModelTags?: boolean;
+  alwaysShowAgenticTurns?: boolean;
+  samplers?: string;
+  backend_sampling?: boolean;
+  agenticMaxTurns?: number;
+  agenticMaxToolPreviewLines?: number;
+  preEncodeConversation?: boolean;
+  disableReasoningParsing?: boolean;
+  excludeReasoningFromContext?: boolean;
+  enableThinking?: boolean;
+  showRawOutputSwitch?: boolean;
+  customJson?: string;
+  customCss?: string;
+  mcpRequestTimeoutSeconds?: number;
+  showSystemMessage?: boolean;
+  mcpServers?: string; // JSON string
+}
+
+export interface MCPServerConfig {
+  id: string;
+  enabled: boolean;
+  name: string;
+  url: string;
+  requestTimeoutSeconds: number;
+  useProxy: boolean;
+}
+
+export interface LlamaUIMigrationState {
+  version: number;
+  completed: string[];
+  failed: string[];
+  lastRun: string;
 }
