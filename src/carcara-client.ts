@@ -3,6 +3,7 @@ import axios, { AxiosInstance, InternalAxiosRequestConfig } from 'axios';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import pino from 'pino';
+import { LlamaUIConfigService } from './llama-ui-config.js';
 import {
   CarcaraConfig, LlamaMessage, ConversationNode, ChatCompletionResponse,
   MCPListResponse, LoginPayload, ModelInfo, LoginScript, LoginStep, StoredSession
@@ -184,6 +185,7 @@ export class CarcaraClient {
   private axiosInstance: AxiosInstance;
   private config: { baseUrl: string; apiBaseUrl: string; domain: string };
   private recorder: LoginRecorder;
+  private llamaUIConfig: LlamaUIConfigService;
 
   private authToken: string | null = null;
   private phpsessid: string | null = null;
@@ -207,6 +209,7 @@ export class CarcaraClient {
 
     this.axiosInstance = this.createAxiosInstance();
     this.recorder = new LoginRecorder();
+    this.llamaUIConfig = new LlamaUIConfigService();
   }
 
   // UMA unica instancia Axios com interceptor de cookies
@@ -1005,5 +1008,12 @@ export class CarcaraClient {
 
   get models(): ModelInfo[] {
     return this.availableModels;
+  }
+
+  get llamaUI(): LlamaUIConfigService {
+    if (this.page && !this.page.isClosed()) {
+      this.llamaUIConfig.setPage(this.page);
+    }
+    return this.llamaUIConfig;
   }
 }

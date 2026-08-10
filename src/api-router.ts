@@ -6,6 +6,7 @@ import rateLimit from 'express-rate-limit';
 import { CarcaraClient } from './carcara-client.js';
 import { customMCPTools } from './mcp-tools.js';
 import { SearchService } from './search-service.js';
+import { LlamaUIConfigService, MCPServerConfig } from './llama-ui-config.js';
 import { ChatMessage, ToolCall } from './types.js';
 
 const limiter = rateLimit({
@@ -416,6 +417,156 @@ export class CarcaraRouter {
         res.json({ total: debug.length, conversations: debug });
       } catch {
         res.json({ total: 0, conversations: [] });
+      }
+    });
+
+
+    // ==========================================
+    // LLAMAUI CONFIG (localStorage)
+    // ==========================================
+
+    this.app.get('/api/config', async (_req: Request, res: Response) => {
+      try {
+        const config = await this.client.llamaUI.getConfig();
+        res.json({ config });
+      } catch (error: any) {
+        res.status(500).json({ error: error.message });
+      }
+    });
+
+    this.app.post('/api/config', async (req: Request, res: Response) => {
+      try {
+        await this.client.llamaUI.setConfig(req.body);
+        res.json({ success: true });
+      } catch (error: any) {
+        res.status(500).json({ error: error.message });
+      }
+    });
+
+    this.app.get('/api/config/system-message', async (_req: Request, res: Response) => {
+      try {
+        const msg = await this.client.llamaUI.getSystemMessage();
+        res.json({ systemMessage: msg });
+      } catch (error: any) {
+        res.status(500).json({ error: error.message });
+      }
+    });
+
+    this.app.post('/api/config/system-message', async (req: Request, res: Response) => {
+      try {
+        const { message } = req.body;
+        if (message === undefined) return res.status(400).json({ error: 'message is required' });
+        await this.client.llamaUI.setSystemMessage(message);
+        res.json({ success: true, systemMessage: message });
+      } catch (error: any) {
+        res.status(500).json({ error: error.message });
+      }
+    });
+
+    this.app.get('/api/config/mcp', async (_req: Request, res: Response) => {
+      try {
+        const servers = await this.client.llamaUI.getMcpServers();
+        res.json({ servers });
+      } catch (error: any) {
+        res.status(500).json({ error: error.message });
+      }
+    });
+
+    this.app.post('/api/config/mcp', async (req: Request, res: Response) => {
+      try {
+        const server: MCPServerConfig = req.body;
+        if (!server.id || !server.url) return res.status(400).json({ error: 'id and url are required' });
+        await this.client.llamaUI.addMcpServer(server);
+        res.json({ success: true, server });
+      } catch (error: any) {
+        res.status(500).json({ error: error.message });
+      }
+    });
+
+    this.app.delete('/api/config/mcp/:id', async (req: Request, res: Response) => {
+      try {
+        await this.client.llamaUI.removeMcpServer(req.params.id);
+        res.json({ success: true, removed: req.params.id });
+      } catch (error: any) {
+        res.status(500).json({ error: error.message });
+      }
+    });
+
+    this.app.get('/api/config/thinking', async (_req: Request, res: Response) => {
+      try {
+        const enabled = await this.client.llamaUI.getEnableThinking();
+        res.json({ enableThinking: enabled });
+      } catch (error: any) {
+        res.status(500).json({ error: error.message });
+      }
+    });
+
+    this.app.post('/api/config/thinking', async (req: Request, res: Response) => {
+      try {
+        const { enabled } = req.body;
+        if (enabled === undefined) return res.status(400).json({ error: 'enabled is required' });
+        await this.client.llamaUI.setEnableThinking(enabled);
+        res.json({ success: true, enableThinking: enabled });
+      } catch (error: any) {
+        res.status(500).json({ error: error.message });
+      }
+    });
+
+    this.app.get('/api/config/theme', async (_req: Request, res: Response) => {
+      try {
+        const theme = await this.client.llamaUI.getTheme();
+        res.json({ theme });
+      } catch (error: any) {
+        res.status(500).json({ error: error.message });
+      }
+    });
+
+    this.app.post('/api/config/theme', async (req: Request, res: Response) => {
+      try {
+        const { theme } = req.body;
+        if (!theme) return res.status(400).json({ error: 'theme is required' });
+        await this.client.llamaUI.setTheme(theme);
+        res.json({ success: true, theme });
+      } catch (error: any) {
+        res.status(500).json({ error: error.message });
+      }
+    });
+
+    this.app.get('/api/config/raw', async (_req: Request, res: Response) => {
+      try {
+        const data = await this.client.llamaUI.getAllLlamaUiData();
+        res.json(data);
+      } catch (error: any) {
+        res.status(500).json({ error: error.message });
+      }
+    });
+
+    this.app.get('/api/config/raw/:key', async (req: Request, res: Response) => {
+      try {
+        const value = await this.client.llamaUI.getRaw(req.params.key);
+        res.json({ key: req.params.key, value });
+      } catch (error: any) {
+        res.status(500).json({ error: error.message });
+      }
+    });
+
+    this.app.post('/api/config/raw/:key', async (req: Request, res: Response) => {
+      try {
+        const { value } = req.body;
+        if (value === undefined) return res.status(400).json({ error: 'value is required' });
+        await this.client.llamaUI.setRaw(req.params.key, value);
+        res.json({ success: true, key: req.params.key });
+      } catch (error: any) {
+        res.status(500).json({ error: error.message });
+      }
+    });
+
+    this.app.delete('/api/config/reset', async (_req: Request, res: Response) => {
+      try {
+        await this.client.llamaUI.resetConfig();
+        res.json({ success: true, message: 'LlamaUI config resetada' });
+      } catch (error: any) {
+        res.status(500).json({ error: error.message });
       }
     });
 
