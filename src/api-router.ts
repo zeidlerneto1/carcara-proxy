@@ -7,6 +7,7 @@ import { CarcaraClient } from './carcara-client.js';
 import { customMCPTools } from './mcp-tools.js';
 import { SearchService } from './search-service.js';
 import { LlamaUIConfigService, MCPServerConfig } from './llama-ui-config.js';
+import { SandboxService, SandboxLanguage } from './sandbox-service.js';
 
 import { ChatMessage, ToolCall } from './types.js';
 import { Readable } from 'stream';
@@ -482,28 +483,50 @@ export class CarcaraRouter {
 
 
     // ==========================================
-    // SANDBOX (acesso controlado à rede)
+    // SANDBOX DOCKER (execução real de código)
     // ==========================================
 
-    this.app.post('/api/sandbox', async (req: Request, res: Response) => {
+    this.app.get('/api/sandbox/status', async (_req: Request, res: Response) => {
       try {
-        const { enabled, tools } = req.body;
-        this.client.thinking.setConfig({
-          sandboxEnabled: enabled,
-          sandboxTools: tools || ['web_search', 'get_time', 'calculate'],
-        });
-        res.json({ success: true, config: this.client.thinking.getConfig() });
+        const available = await this.sandboxService.isDockerAvailable();
+        res.json({ dockerAvailable: available, config: this.sandboxService.getConfig() });
       } catch (error: any) {
         res.status(500).json({ error: error.message });
       }
     });
 
-    this.app.post('/api/sandbox/test', async (req: Request, res: Response) => {
+    this.app.post('/api/sandbox/exec', async (req: Request, res: Response) => {
       try {
-        const { prompt } = req.body;
-        if (!prompt) return res.status(400).json({ error: 'prompt is required' });
-        const enriched = await this.client.thinking.executeSandbox(prompt);
-        res.json({ original: prompt, enriched, config: this.client.thinking.getConfig() });
+        const { code, language, timeout, memory } = req.body;
+        if (!code) return res.status(400).json({ error: 'code is required' });
+        if (!language) return res.status(400).json({ error: 'language is required' });
+
+        const validLangs: SandboxLanguage[] = ['python', 'javascript', 'typescript', 'bash', 'sh'];
+        if (!validLangs.includes(language)) {
+          return res.status(400).json({ error: `language must be one of: ${validLangs.join(', ')}` });
+        }
+
+        if (timeout) this.sandboxService.setConfig({ timeoutMs: timeout });
+        if (memory) this.sandboxService.setConfig({ memoryLimitMb: memory });
+
+        const result = await this.sandboxService.execute(code, language);
+        res.json(result);
+      } catch (error: any) {
+        res.status(500).json({ error: error.message });
+      }
+    });
+
+    this.app.post('/api/sandbox/config', async (req: Request, res: Response) => {
+      try {
+        const { timeoutMs, memoryLimitMb, cpuPercent, networkEnabled, allowedLanguages } = req.body;
+        this.sandboxService.setConfig({
+          ...(timeoutMs !== undefined && { timeoutMs }),
+          ...(memoryLimitMb !== undefined && { memoryLimitMb }),
+          ...(cpuPercent !== undefined && { cpuPercent }),
+          ...(networkEnabled !== undefined && { networkEnabled }),
+          ...(allowedLanguages !== undefined && { allowedLanguages }),
+        });
+        res.json({ success: true, config: this.sandboxService.getConfig() });
       } catch (error: any) {
         res.status(500).json({ error: error.message });
       }
@@ -691,9 +714,10 @@ export class CarcaraRouter {
         console.log(` GET /mcp/list → Listar ferramentas`);
         console.log(` POST /mcp/call → Chamar ferramenta`);
         console.log('');
-        console.log('🧠 Sandbox (acesso à rede):');
-        console.log(` POST /api/sandbox → Configurar tools da sandbox`);
-        console.log(` POST /api/sandbox/test → Testar enriquecimento de prompt`);
+        console.log('🐳 Sandbox Docker (execução de código):');
+        console.log(` GET /api/sandbox/status → Verificar Docker disponível`);
+        console.log(` POST /api/sandbox/exec → Executar código isolado`);
+        console.log(` POST /api/sandbox/config → Configurar limites`);
         console.log('');
         console.log('📋 Search:');
         console.log(` POST /api/search → Busca multi-provider`);

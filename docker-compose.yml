@@ -1,0 +1,46 @@
+version: "3.8"
+
+services:
+  carcara-proxy:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "${PORT:-3030}:3030"
+    environment:
+      - NODE_ENV=production
+      - PORT=${PORT:-3030}
+      - LNCC_USER=${LNCC_USER}
+      - LNCC_PASS=${LNCC_PASS}
+      - CARCARA_URL=${CARCARA_URL:-https://carcara.sinapad.lncc.br}
+      - MAX_OUTPUT_TOKENS=${MAX_OUTPUT_TOKENS:-4096}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    volumes:
+      - ./.carcara:/app/.carcara
+      - /var/run/docker.sock:/var/run/docker.sock  # necessário para sandbox
+    depends_on:
+      - sandbox
+    restart: unless-stopped
+
+  sandbox:
+    build:
+      context: ./sandbox
+      dockerfile: Dockerfile
+    command: ["sh", "-c", "echo 'Sandbox ready' && sleep infinity"]
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    networks:
+      - sandbox-net
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+    restart: unless-stopped
+
+networks:
+  sandbox-net:
+    driver: bridge
