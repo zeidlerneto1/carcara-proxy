@@ -3,6 +3,7 @@ import axios, { AxiosInstance, InternalAxiosRequestConfig } from 'axios';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import pino from 'pino';
+import { Readable } from 'stream';
 import { LlamaUIConfigService } from './llama-ui-config.js';
 import {
   CarcaraConfig, LlamaMessage, ConversationNode, ChatCompletionResponse,
@@ -866,6 +867,203 @@ export class CarcaraClient {
     this.currentConversationId = id;
     logger.info({ id, title }, 'Conversa criada');
     return id;
+  }
+
+
+  // ==========================================================================
+  // STREAMING SSE REAL (proxy direto do LNCC)
+  // ==========================================================================
+
+  async chatCompletionStream(
+    prompt: string,
+    model?: string,
+    tools?: any[]
+  ): Promise<Readable> {
+    this.ensureInitialized();
+    if (!this.currentConversationId) {
+      await this.createNewConversation();
+    }
+
+    const modelToUse = model || this.getDefaultModel();
+    const convId = this.currentConversationId!;
+
+    // Salva mensagem do usuário no IndexedDB
+    const conversations = await this.getConversations();
+    const conv = conversations.find(c => c.id === convId);
+    const parentId = conv?.currNode || null;
+
+    const userMsgId = crypto.randomUUID ? crypto.randomUUID() : `msg_${Date.now()}`;
+    const userMsg: LlamaMessage = {
+      id: userMsgId, convId, role: 'user', type: 'text', content: prompt,
+      parent: parentId, children: [], timestamp: Date.now(),
+    };
+    await this.saveMessage(userMsg);
+    if (parentId) await this.addChildToMessage(parentId, userMsgId);
+
+    const payload: any = {
+      model: modelToUse,
+      messages: [{ role: 'user', content: prompt }],
+      stream: true,
+      temperature: DEFAULT_TEMPERATURE,
+      max_tokens: DEFAULT_MAX_TOKENS,
+      return_progress: true,
+      reasoning_format: 'auto',
+      chat_template_kwargs: { enable_thinking: false },
+      reasoning_control: true,
+      backend_sampling: false,
+      timings_per_token: false,
+    };
+    if (tools?.length) payload.tools = tools;
+
+    logger.info({ model: modelToUse }, 'Streaming para modelo');
+
+    const response = await this.axiosInstance.post(CHAT_API, payload, {
+      baseURL: this.config.apiBaseUrl,
+      timeout: TIMEOUT_CHAT,
+      responseType: 'stream',
+    });
+
+    // Bufferiza a resposta completa para salvar no IndexedDB depois
+    let fullContent = '';
+    let assistantMsgId = '';
+    let completionId = '';
+    let finishReason = '';
+    let timings: any = null;
+
+    const sourceStream = response.data as Readable;
+    const passThrough = new Readable({ read() {} });
+
+    sourceStream.on('data', (chunk: Buffer) => {
+      const lines = chunk.toString().split('\n');
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const data = line.slice(6);
+        if (data === '[DONE]') {
+          passThrough.push(chunk);
+          continue;
+        }
+        try {
+          const parsed = JSON.parse(data);
+          if (parsed.id && !completionId) completionId = parsed.id;
+          const delta = parsed.choices?.[0]?.delta;
+          if (delta?.content) fullContent += delta.content;
+          const fr = parsed.choices?.[0]?.finish_reason;
+          if (fr) finishReason = fr;
+          if (parsed.timings) timings = parsed.timings;
+        } catch {}
+        passThrough.push(chunk);
+      }
+    });
+
+    sourceStream.on('end', async () => {
+      passThrough.push(null);
+
+      // Salva assistant no IndexedDB
+      assistantMsgId = crypto.randomUUID ? crypto.randomUUID() : `msg_${Date.now()}`;
+      const assistantMsg: LlamaMessage = {
+        id: assistantMsgId, convId, role: 'assistant', type: 'text',
+        content: fullContent, parent: userMsgId, children: [],
+        timestamp: Date.now(), model: modelToUse,
+        completionId: completionId || '', timings,
+        toolCalls: '',
+      };
+      await this.saveMessage(assistantMsg);
+      await this.addChildToMessage(userMsgId, assistantMsgId);
+
+      // Atualiza conversa
+      if (conv) {
+        conv.currNode = assistantMsgId;
+        conv.lastModified = Date.now();
+        await this.saveConversation(conv);
+      }
+
+      // Append no arquivo JSONL
+      try {
+        const chatDir = path.join(process.cwd(), '.carcara', 'chats');
+        await fs.mkdir(chatDir, { recursive: true });
+        const filePath = path.join(chatDir, `${convId}.jsonl`);
+        const entry = JSON.stringify({ timestamp: new Date().toISOString(), model: modelToUse, role: 'user', content: prompt }) + '\n';
+        const respEntry = JSON.stringify({ timestamp: new Date().toISOString(), model: modelToUse, role: 'assistant', content: fullContent, completionId, finishReason }) + '\n';
+        await fs.appendFile(filePath, entry + respEntry, 'utf-8');
+      } catch (e: any) {
+        logger.warn({ error: e.message }, 'Erro ao salvar arquivo');
+      }
+
+      logger.info({ chars: fullContent.length, finishReason }, 'Stream completo');
+    });
+
+    sourceStream.on('error', (err: any) => {
+      passThrough.destroy(err);
+    });
+
+    return passThrough;
+  }
+
+  // ==========================================================================
+  // CONTINUE GENERATION (quebra limite de 4096 tokens)
+  // ==========================================================================
+
+  async chatCompletionWithContinue(
+    prompt: string,
+    model?: string,
+    tools?: any[]
+  ): Promise<ChatCompletionResponse> {
+    this.ensureInitialized();
+    let fullContent = '';
+    let totalPromptTokens = 0;
+    let totalCompletionTokens = 0;
+    let attempts = 0;
+    const MAX_CONTINUES = 5;
+    let lastCompletionId = '';
+    let lastTimings: any = null;
+    let lastToolCalls: ToolCall[] | undefined;
+
+    while (attempts < MAX_CONTINUES) {
+      const currentPrompt = attempts === 0
+        ? prompt
+        : `Continue exactly from where you stopped. Do not repeat what was already said.\n\nPrevious output:\n${fullContent.slice(-3000)}`;
+
+      const response = await this.chatCompletion(currentPrompt, model, tools);
+      const choice = response.choices[0];
+      const content = choice.message.content || '';
+
+      fullContent += content;
+      lastCompletionId = response.id;
+      lastTimings = response.timings;
+      lastToolCalls = choice.message.tool_calls;
+
+      totalPromptTokens += response.usage?.prompt_tokens || 0;
+      totalCompletionTokens += response.usage?.completion_tokens || 0;
+
+      if (choice.finish_reason !== 'length') {
+        break; // terminou naturalmente
+      }
+
+      attempts++;
+      logger.info({ attempt: attempts, chars: fullContent.length }, 'Continue generation');
+    }
+
+    // Retorna uma response "fake" com o conteúdo concatenado
+    return {
+      id: lastCompletionId || `chatcmpl-${Date.now()}`,
+      object: 'chat.completion',
+      created: Math.floor(Date.now() / 1000),
+      model: model || this.getDefaultModel(),
+      choices: [{
+        index: 0,
+        message: {
+          role: 'assistant',
+          content: fullContent,
+          tool_calls: lastToolCalls,
+        },
+        finish_reason: attempts > 0 ? 'stop' : (lastToolCalls?.length ? 'tool_calls' : 'stop'),
+      }],
+      usage: {
+        prompt_tokens: totalPromptTokens,
+        completion_tokens: totalCompletionTokens,
+        total_tokens: totalPromptTokens + totalCompletionTokens,
+      },
+    };
   }
 
   async chatCompletion(

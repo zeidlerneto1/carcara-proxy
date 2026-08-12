@@ -8,6 +8,7 @@ import { customMCPTools } from './mcp-tools.js';
 import { SearchService } from './search-service.js';
 import { LlamaUIConfigService, MCPServerConfig } from './llama-ui-config.js';
 import { ChatMessage, ToolCall } from './types.js';
+import { Readable } from 'stream';
 
 const limiter = rateLimit({
   windowMs: 1 * 60 * 1000,
@@ -147,7 +148,7 @@ export class CarcaraRouter {
 
         console.log(`Response: ${content.length} chars`);
 
-        // STREAMING SSE otimizado (chunks de 20 chars)
+        // STREAMING SSE REAL - proxy direto do LNCC
         if (stream) {
           res.setHeader('Content-Type', 'text/event-stream');
           res.setHeader('Cache-Control', 'no-cache');
@@ -155,38 +156,51 @@ export class CarcaraRouter {
           res.setHeader('X-Accel-Buffering', 'no');
           res.flushHeaders();
 
-          if (toolCalls?.length) {
+          try {
+            // Faz request ao LNCC com stream=true e pipeia direto
+            const lnccStream = await this.client.chatCompletionStream(
+              prompt, model, tools
+            );
+
+            lnccStream.on('data', (chunk: Buffer) => {
+              res.write(chunk);
+            });
+
+            lnccStream.on('end', () => {
+              res.end();
+            });
+
+            lnccStream.on('error', (err: any) => {
+              console.error('Stream error:', err.message);
+              res.write(`data: ${JSON.stringify({ error: err.message })}\n\n`);
+              res.end();
+            });
+
+            // Se cliente fecha conexão, aborta stream
+            req.on('close', () => {
+              lnccStream.destroy?.();
+            });
+
+            return;
+          } catch (err: any) {
+            console.error('Streaming failed, falling back:', err.message);
+            // Fallback: streaming simulado
+            const CHUNK_SIZE = 20;
+            for (let i = 0; i < content.length; i += CHUNK_SIZE) {
+              const chunk = content.slice(i, i + CHUNK_SIZE);
+              const delta = i === 0 ? { role: 'assistant', content: chunk } : { content: chunk };
+              res.write(`data: ${JSON.stringify({
+                id: completionId, object: 'chat.completion.chunk', created, model: modelName,
+                choices: [{ index: 0, delta, finish_reason: null }],
+              })}\n\n`);
+            }
             res.write(`data: ${JSON.stringify({
               id: completionId, object: 'chat.completion.chunk', created, model: modelName,
-              choices: [{ index: 0, delta: { role: 'assistant', tool_calls: toolCalls }, finish_reason: null }],
-            })}\n\n`);
-            res.write(`data: ${JSON.stringify({
-              id: completionId, object: 'chat.completion.chunk', created, model: modelName,
-              choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }],
+              choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
             })}\n\n`);
             res.write('data: [DONE]\n\n');
             return res.end();
           }
-
-          // Envia em chunks de 20 caracteres (mais eficiente que palavra por palavra)
-          const CHUNK_SIZE = 20;
-          for (let i = 0; i < content.length; i += CHUNK_SIZE) {
-            const chunk = content.slice(i, i + CHUNK_SIZE);
-            const delta = i === 0
-              ? { role: 'assistant', content: chunk }
-              : { content: chunk };
-            res.write(`data: ${JSON.stringify({
-              id: completionId, object: 'chat.completion.chunk', created, model: modelName,
-              choices: [{ index: 0, delta, finish_reason: null }],
-            })}\n\n`);
-          }
-
-          res.write(`data: ${JSON.stringify({
-            id: completionId, object: 'chat.completion.chunk', created, model: modelName,
-            choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
-          })}\n\n`);
-          res.write('data: [DONE]\n\n');
-          return res.end();
         }
 
         // Nao-streaming
@@ -206,6 +220,26 @@ export class CarcaraRouter {
       } catch (error: any) {
         console.error('Chat completion error:', error.message);
         res.status(500).json({ error: { message: error.message, type: 'api_error' } });
+      }
+    });
+
+
+    // Continue generation (quebra limite de tokens)
+    this.app.post('/v1/chat/completions/continue', strictLimiter, async (req: Request, res: Response) => {
+      try {
+        const { model, messages, tools } = req.body;
+        const msgs: ChatMessage[] = messages || [];
+        if (!msgs.length) return res.status(400).json({ error: 'Messages are required' });
+
+        const lastUser = msgs.filter(m => m.role === 'user').pop();
+        if (!lastUser) return res.status(400).json({ error: 'No user message' });
+
+        const response = await this.client.chatCompletionWithContinue(
+          lastUser.content, model, tools
+        );
+        res.json(response);
+      } catch (error: any) {
+        res.status(500).json({ error: error.message });
       }
     });
 
