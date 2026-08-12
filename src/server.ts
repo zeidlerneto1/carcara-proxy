@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import { CarcaraRouter } from './api-router.js';
 
 const PORT = parseInt(process.env.PORT || '3030', 10);
