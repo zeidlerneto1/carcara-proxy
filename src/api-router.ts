@@ -7,6 +7,7 @@ import { CarcaraClient } from './carcara-client.js';
 import { customMCPTools } from './mcp-tools.js';
 import { SearchService } from './search-service.js';
 import { LlamaUIConfigService, MCPServerConfig } from './llama-ui-config.js';
+import { ThinkingLevel } from './thinking-service.js';
 import { ChatMessage, ToolCall } from './types.js';
 import { Readable } from 'stream';
 
@@ -479,6 +480,66 @@ export class CarcaraRouter {
       }
     });
 
+
+    // ==========================================
+    // THINKING / SANDBOX
+    // ==========================================
+
+    this.app.get('/api/thinking/config', async (_req: Request, res: Response) => {
+      try {
+        res.json(this.client.thinking.getConfig());
+      } catch (error: any) {
+        res.status(500).json({ error: error.message });
+      }
+    });
+
+    this.app.post('/api/thinking/config', async (req: Request, res: Response) => {
+      try {
+        this.client.thinking.setConfig(req.body);
+        res.json({ success: true, config: this.client.thinking.getConfig() });
+      } catch (error: any) {
+        res.status(500).json({ error: error.message });
+      }
+    });
+
+    this.app.post('/api/thinking/level', async (req: Request, res: Response) => {
+      try {
+        const { level } = req.body;
+        const validLevels: ThinkingLevel[] = ['off', 'low', 'medium', 'high', 'max'];
+        if (!validLevels.includes(level)) {
+          return res.status(400).json({ error: 'Invalid level. Use: off, low, medium, high, max' });
+        }
+        this.client.thinking.setLevel(level);
+        res.json({ success: true, level, config: this.client.thinking.getConfig() });
+      } catch (error: any) {
+        res.status(500).json({ error: error.message });
+      }
+    });
+
+    this.app.post('/api/thinking/sandbox', async (req: Request, res: Response) => {
+      try {
+        const { enabled, tools } = req.body;
+        this.client.thinking.setConfig({
+          sandboxEnabled: enabled,
+          sandboxTools: tools || ['web_search', 'get_time', 'calculate'],
+        });
+        res.json({ success: true, config: this.client.thinking.getConfig() });
+      } catch (error: any) {
+        res.status(500).json({ error: error.message });
+      }
+    });
+
+    this.app.post('/api/thinking/test', async (req: Request, res: Response) => {
+      try {
+        const { prompt } = req.body;
+        if (!prompt) return res.status(400).json({ error: 'prompt is required' });
+        const enriched = await this.client.thinking.executeSandbox(prompt);
+        res.json({ original: prompt, enriched, config: this.client.thinking.getConfig() });
+      } catch (error: any) {
+        res.status(500).json({ error: error.message });
+      }
+    });
+
     // ==========================================
     // LLAMAUI CONFIG (localStorage)
     // ==========================================
@@ -660,6 +721,13 @@ export class CarcaraRouter {
         console.log('📋 MCP Tools:');
         console.log(` GET /mcp/list → Listar ferramentas`);
         console.log(` POST /mcp/call → Chamar ferramenta`);
+        console.log('');
+        console.log('🧠 Thinking / Sandbox:');
+        console.log(` GET /api/thinking/config → Config de thinking`);
+        console.log(` POST /api/thinking/config → Atualizar config`);
+        console.log(` POST /api/thinking/level → Nível: off/low/medium/high/max`);
+        console.log(` POST /api/thinking/sandbox → Habilitar/desabilitar sandbox`);
+        console.log(` POST /api/thinking/test → Testar enriquecimento de prompt`);
         console.log('');
         console.log('📋 Search:');
         console.log(` POST /api/search → Busca multi-provider`);

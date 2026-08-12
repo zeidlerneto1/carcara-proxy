@@ -5,6 +5,7 @@ import * as path from 'path';
 import pino from 'pino';
 import { Readable } from 'stream';
 import { LlamaUIConfigService } from './llama-ui-config.js';
+import { ThinkingService, ThinkingConfig, ThinkingLevel } from './thinking-service.js';
 import {
   CarcaraConfig, LlamaMessage, ConversationNode, ChatCompletionResponse,
   MCPListResponse, LoginPayload, ModelInfo, LoginScript, LoginStep, StoredSession
@@ -189,6 +190,7 @@ export class CarcaraClient {
   private config: { baseUrl: string; apiBaseUrl: string; domain: string };
   private recorder: LoginRecorder;
   private llamaUIConfig: LlamaUIConfigService;
+  private thinkingService: ThinkingService;
 
   private authToken: string | null = null;
   private phpsessid: string | null = null;
@@ -213,6 +215,7 @@ export class CarcaraClient {
     this.axiosInstance = this.createAxiosInstance();
     this.recorder = new LoginRecorder();
     this.llamaUIConfig = new LlamaUIConfigService();
+    this.thinkingService = new ThinkingService();
   }
 
   // UMA unica instancia Axios com interceptor de cookies
@@ -900,19 +903,23 @@ export class CarcaraClient {
     await this.saveMessage(userMsg);
     if (parentId) await this.addChildToMessage(parentId, userMsgId);
 
+    // Aplica sandbox de thinking
+    const enrichedPrompt = await this.thinkingService.executeSandbox(prompt);
+
     const payload: any = {
       model: modelToUse,
-      messages: [{ role: 'user', content: prompt }],
+      messages: [{ role: 'user', content: enrichedPrompt }],
       stream: true,
       temperature: DEFAULT_TEMPERATURE,
       max_tokens: DEFAULT_MAX_TOKENS,
       return_progress: true,
-      reasoning_format: 'auto',
-      chat_template_kwargs: { enable_thinking: false },
-      reasoning_control: true,
       backend_sampling: false,
-      timings_per_token: false,
+      timings_per_token: true,
     };
+
+    this.thinkingService.applyToPayload(payload);
+
+    if (tools?.length) payload.tools = tools;
     if (tools?.length) payload.tools = tools;
 
     logger.info({ model: modelToUse }, 'Streaming para modelo');
@@ -1103,19 +1110,24 @@ export class CarcaraClient {
       await this.addChildToMessage(parentId, userMsgId);
     }
 
+    // Aplica sandbox de thinking (enriquece prompt com contexto da web)
+    const enrichedPrompt = await this.thinkingService.executeSandbox(prompt);
+
     const payload: any = {
       model: modelToUse,
-      messages: [{ role: 'user', content: prompt }],
+      messages: [{ role: 'user', content: enrichedPrompt }],
       stream: false,
       temperature: DEFAULT_TEMPERATURE,
       max_tokens: DEFAULT_MAX_TOKENS,
       return_progress: true,
-      reasoning_format: 'auto',
-      chat_template_kwargs: { enable_thinking: false },
-      reasoning_control: true,
       backend_sampling: false,
       timings_per_token: false,
     };
+
+    // Aplica config de thinking (enable_thinking, budget_tokens, etc.)
+    this.thinkingService.applyToPayload(payload);
+
+    if (tools?.length) payload.tools = tools;
     if (tools?.length) payload.tools = tools;
 
     logger.info({ model: modelToUse }, 'Enviando para modelo');
@@ -1303,6 +1315,10 @@ export class CarcaraClient {
 
   get models(): ModelInfo[] {
     return this.availableModels;
+  }
+
+  get thinking(): ThinkingService {
+    return this.thinkingService;
   }
 
   get llamaUI(): LlamaUIConfigService {
