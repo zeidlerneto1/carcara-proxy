@@ -8,6 +8,7 @@ import { customMCPTools } from './mcp-tools.js';
 import { SearchService } from './search-service.js';
 import { LlamaUIConfigService, MCPServerConfig } from './llama-ui-config.js';
 import { SandboxService, SandboxLanguage } from './sandbox-service.js';
+import { LocalSandboxService, LocalSandboxLanguage } from './sandbox-local.js';
 
 import { ChatMessage, ToolCall } from './types.js';
 import { Readable } from 'stream';
@@ -30,12 +31,16 @@ export class CarcaraRouter {
   private app: express.Application;
   private client: CarcaraClient;
   private searchService: SearchService;
+  private sandboxService: SandboxService;
+  private localSandboxService: LocalSandboxService;
   private port: number;
 
   constructor(port: number = 3030) {
     this.port = port;
     this.client = new CarcaraClient({ domain: 'LNCC' });
     this.searchService = new SearchService();
+    this.sandboxService = new SandboxService();
+    this.localSandboxService = new LocalSandboxService();
     this.app = express();
   }
 
@@ -483,13 +488,20 @@ export class CarcaraRouter {
 
 
     // ==========================================
-    // SANDBOX DOCKER (execução real de código)
+    // SANDBOX (Docker + Local fallback)
     // ==========================================
 
     this.app.get('/api/sandbox/status', async (_req: Request, res: Response) => {
       try {
-        const available = await this.sandboxService.isDockerAvailable();
-        res.json({ dockerAvailable: available, config: this.sandboxService.getConfig() });
+        const dockerAvailable = await this.sandboxService.isDockerAvailable();
+        const localAvailable = await this.localSandboxService.isLanguageAvailable('python');
+        res.json({
+          dockerAvailable,
+          localAvailable,
+          dockerConfig: this.sandboxService.getConfig(),
+          localConfig: this.localSandboxService.getConfig(),
+          mode: dockerAvailable ? 'docker' : 'local',
+        });
       } catch (error: any) {
         res.status(500).json({ error: error.message });
       }
@@ -497,20 +509,33 @@ export class CarcaraRouter {
 
     this.app.post('/api/sandbox/exec', async (req: Request, res: Response) => {
       try {
-        const { code, language, timeout, memory } = req.body;
+        const { code, language, timeout, memory, forceLocal } = req.body;
         if (!code) return res.status(400).json({ error: 'code is required' });
         if (!language) return res.status(400).json({ error: 'language is required' });
 
-        const validLangs: SandboxLanguage[] = ['python', 'javascript', 'typescript', 'bash', 'sh'];
-        if (!validLangs.includes(language)) {
-          return res.status(400).json({ error: `language must be one of: ${validLangs.join(', ')}` });
+        // Docker languages
+        const dockerLangs: SandboxLanguage[] = ['python', 'javascript', 'typescript', 'bash', 'sh'];
+        // Local languages (includes cmd for Windows)
+        const localLangs: LocalSandboxLanguage[] = ['python', 'javascript', 'bash', 'sh', 'cmd'];
+
+        const useDocker = !forceLocal && await this.sandboxService.isDockerAvailable();
+
+        if (useDocker) {
+          if (!dockerLangs.includes(language)) {
+            return res.status(400).json({ error: `Docker sandbox: language must be one of: ${dockerLangs.join(', ')}` });
+          }
+          if (timeout) this.sandboxService.setConfig({ timeoutMs: timeout });
+          if (memory) this.sandboxService.setConfig({ memoryLimitMb: memory });
+          const result = await this.sandboxService.execute(code, language);
+          return res.json({ ...result, mode: 'docker' });
+        } else {
+          if (!localLangs.includes(language)) {
+            return res.status(400).json({ error: `Local sandbox: language must be one of: ${localLangs.join(', ')}` });
+          }
+          if (timeout) this.localSandboxService.setConfig({ timeoutMs: timeout });
+          const result = await this.localSandboxService.execute(code, language as LocalSandboxLanguage);
+          return res.json({ ...result, mode: 'local' });
         }
-
-        if (timeout) this.sandboxService.setConfig({ timeoutMs: timeout });
-        if (memory) this.sandboxService.setConfig({ memoryLimitMb: memory });
-
-        const result = await this.sandboxService.execute(code, language);
-        res.json(result);
       } catch (error: any) {
         res.status(500).json({ error: error.message });
       }
@@ -526,7 +551,16 @@ export class CarcaraRouter {
           ...(networkEnabled !== undefined && { networkEnabled }),
           ...(allowedLanguages !== undefined && { allowedLanguages }),
         });
-        res.json({ success: true, config: this.sandboxService.getConfig() });
+        this.localSandboxService.setConfig({
+          ...(timeoutMs !== undefined && { timeoutMs }),
+          ...(memoryLimitMb !== undefined && { memoryLimitMb }),
+          ...(allowedLanguages !== undefined && { allowedLanguages }),
+        });
+        res.json({
+          success: true,
+          dockerConfig: this.sandboxService.getConfig(),
+          localConfig: this.localSandboxService.getConfig(),
+        });
       } catch (error: any) {
         res.status(500).json({ error: error.message });
       }
@@ -714,9 +748,9 @@ export class CarcaraRouter {
         console.log(` GET /mcp/list → Listar ferramentas`);
         console.log(` POST /mcp/call → Chamar ferramenta`);
         console.log('');
-        console.log('🐳 Sandbox Docker (execução de código):');
-        console.log(` GET /api/sandbox/status → Verificar Docker disponível`);
-        console.log(` POST /api/sandbox/exec → Executar código isolado`);
+        console.log('🐳 Sandbox (Docker + Local fallback):');
+        console.log(` GET /api/sandbox/status → Verificar Docker/Local disponível`);
+        console.log(` POST /api/sandbox/exec → Executar código (Docker → Local)`);
         console.log(` POST /api/sandbox/config → Configurar limites`);
         console.log('');
         console.log('📋 Search:');

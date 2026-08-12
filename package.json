@@ -13,6 +13,7 @@
     "format": "prettier --write \"src/**/*.ts\"",
     "format:check": "prettier --check \"src/**/*.ts\"",
     "clean": "rm -rf dist .carcara test-results",
+    "chat": "tsx src/chat-cli.ts",
     "clean:logs": "rm -rf .carcara/*.log",
     "setup": "npm install && npx playwright install chromium"
   },
