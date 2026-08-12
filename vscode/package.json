@@ -1,0 +1,273 @@
+{
+  "name": "carcara-chat",
+  "displayName": "🦙 Carcara Chat",
+  "description": "Chat com IA Carcara LNCC diretamente no VS Code - Proxy OpenAI/Ollama",
+  "version": "1.0.0",
+  "publisher": "zeidlerneto1",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Machine Learning",
+    "Chat",
+    "Snippets",
+    "Other"
+  ],
+  "keywords": [
+    "carcara",
+    "lncc",
+    "ai",
+    "chat",
+    "llm",
+    "openai",
+    "ollama",
+    "sandbox"
+  ],
+  "activationEvents": [
+    "onCommand:carcara.openChat",
+    "onView:carcaraSidebar"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "carcara.openChat",
+        "title": "Abrir Chat Carcara",
+        "icon": "$(comment-discussion)",
+        "category": "Carcara"
+      },
+      {
+        "command": "carcara.openSandbox",
+        "title": "Abrir Sandbox",
+        "icon": "$(terminal)",
+        "category": "Carcara"
+      },
+      {
+        "command": "carcara.newConversation",
+        "title": "Nova Conversa",
+        "icon": "$(add)",
+        "category": "Carcara"
+      },
+      {
+        "command": "carcara.clearHistory",
+        "title": "Limpar Histórico",
+        "icon": "$(clear-all)",
+        "category": "Carcara"
+      },
+      {
+        "command": "carcara.refreshConversations",
+        "title": "Atualizar Conversas",
+        "icon": "$(refresh)",
+        "category": "Carcara"
+      },
+      {
+        "command": "carcara.openConversation",
+        "title": "Abrir Conversa",
+        "category": "Carcara"
+      },
+      {
+        "command": "carcara.deleteConversation",
+        "title": "Excluir Conversa",
+        "icon": "$(trash)",
+        "category": "Carcara"
+      },
+      {
+        "command": "carcara.searchWeb",
+        "title": "Buscar na Web",
+        "icon": "$(search)",
+        "category": "Carcara"
+      },
+      {
+        "command": "carcara.executeCode",
+        "title": "Executar Código no Sandbox",
+        "icon": "$(play)",
+        "category": "Carcara"
+      },
+      {
+        "command": "carcara.configureProxy",
+        "title": "Configurar Proxy",
+        "icon": "$(gear)",
+        "category": "Carcara"
+      },
+      {
+        "command": "carcara.insertCode",
+        "title": "Inserir Código no Editor",
+        "icon": "$(insert)",
+        "category": "Carcara"
+      }
+    ],
+    "views": {
+      "explorer": [
+        {
+          "id": "carcaraSidebar",
+          "name": "🦙 Carcara",
+          "when": "carcara.enabled",
+          "icon": "$(comment-discussion)",
+          "contextualTitle": "Carcara Chat"
+        }
+      ]
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "carcaraContainer",
+          "title": "Carcara",
+          "icon": "$(comment-discussion)"
+        }
+      ]
+    },
+    "views": {
+      "carcaraContainer": [
+        {
+          "id": "carcaraConversations",
+          "name": "Conversas",
+          "icon": "$(comment-discussion)"
+        },
+        {
+          "id": "carcaraModels",
+          "name": "Modelos",
+          "icon": "$(symbol-misc)"
+        }
+      ]
+    },
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "carcara.openConversation",
+          "when": "false"
+        },
+        {
+          "command": "carcara.deleteConversation",
+          "when": "false"
+        },
+        {
+          "command": "carcara.insertCode",
+          "when": "false"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "carcara.newConversation",
+          "when": "view == carcaraConversations",
+          "group": "navigation@1"
+        },
+        {
+          "command": "carcara.refreshConversations",
+          "when": "view == carcaraConversations",
+          "group": "navigation@2"
+        },
+        {
+          "command": "carcara.configureProxy",
+          "when": "view == carcaraConversations",
+          "group": "navigation@3"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "carcara.openConversation",
+          "when": "view == carcaraConversations && viewItem == conversation",
+          "group": "inline@1"
+        },
+        {
+          "command": "carcara.deleteConversation",
+          "when": "view == carcaraConversations && viewItem == conversation",
+          "group": "inline@2"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "carcara.executeCode",
+          "when": "editorHasSelection",
+          "group": "carcara@1"
+        },
+        {
+          "command": "carcara.openChat",
+          "group": "carcara@2"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "carcara.openChat",
+        "key": "ctrl+shift+c",
+        "mac": "cmd+shift+c",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "carcara.executeCode",
+        "key": "ctrl+shift+s",
+        "mac": "cmd+shift+s",
+        "when": "editorHasSelection"
+      }
+    ],
+    "configuration": {
+      "title": "Carcara",
+      "properties": {
+        "carcara.proxyUrl": {
+          "type": "string",
+          "default": "http://localhost:3030",
+          "description": "URL do proxy Carcara"
+        },
+        "carcara.defaultModel": {
+          "type": "string",
+          "default": "DeepSeek-v4-Flash-0731",
+          "description": "Modelo padrão para chat"
+        },
+        "carcara.streamEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Habilitar streaming de respostas"
+        },
+        "carcara.systemMessage": {
+          "type": "string",
+          "default": "Você é um assistente de programação útil. Responda em português do Brasil.",
+          "description": "Mensagem de sistema padrão"
+        },
+        "carcara.maxHistoryMessages": {
+          "type": "number",
+          "default": 20,
+          "description": "Número máximo de mensagens no histórico"
+        },
+        "carcara.theme": {
+          "type": "string",
+          "enum": ["dark", "light", "auto"],
+          "default": "auto",
+          "description": "Tema do chat"
+        },
+        "carcara.sandboxTimeout": {
+          "type": "number",
+          "default": 30000,
+          "description": "Timeout do sandbox em ms"
+        },
+        "carcara.enableThinking": {
+          "type": "boolean",
+          "default": false,
+          "description": "Habilitar modo thinking"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile && npm run lint",
+    "lint": "eslint src --ext ts",
+    "test": "node ./out/test/runTest.js",
+    "package": "vsce package",
+    "publish": "vsce publish"
+  },
+  "devDependencies": {
+    "@types/node": "20.x",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^6.15.0",
+    "@typescript-eslint/parser": "^6.15.0",
+    "eslint": "^8.56.0",
+    "typescript": "^5.3.3"
+  },
+  "dependencies": {
+    "marked": "^11.0.0",
+    "highlight.js": "^11.9.0"
+  }
+}
