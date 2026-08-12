@@ -5,7 +5,7 @@ import * as path from 'path';
 import pino from 'pino';
 import { Readable } from 'stream';
 import { LlamaUIConfigService } from './llama-ui-config.js';
-import { ThinkingService, ThinkingConfig, ThinkingLevel } from './thinking-service.js';
+import { ThinkingService, ThinkingConfig } from './thinking-service.js';
 import {
   CarcaraConfig, LlamaMessage, ConversationNode, ChatCompletionResponse,
   MCPListResponse, LoginPayload, ModelInfo, LoginScript, LoginStep, StoredSession

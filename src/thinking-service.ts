@@ -1,5 +1,4 @@
 import { SearchService } from './search-service.js';
-import { LlamaUIConfigService } from './llama-ui-config.js';
 
 export type ThinkingLevel = 'off' | 'low' | 'medium' | 'high' | 'max';
 
@@ -10,7 +9,7 @@ export interface ThinkingConfig {
   reasoningControl: boolean;
   reasoningFormat: 'auto' | 'plain' | 'structured';
   sandboxEnabled: boolean;
-  sandboxTools: string[]; // quais tools a sandbox pode usar
+  sandboxTools: string[];
 }
 
 const LEVEL_MAP: Record<ThinkingLevel, number> = {
@@ -34,7 +33,7 @@ export class ThinkingService {
   };
 
   // ==========================================================================
-  // CONFIG
+  // CONFIG (usado pelo carcara-client ao inicializar)
   // ==========================================================================
 
   setConfig(cfg: Partial<ThinkingConfig>): void {
@@ -55,7 +54,7 @@ export class ThinkingService {
   }
 
   // ==========================================================================
-  // APLICAR NO PAYLOAD DO CARCARA
+  // APLICAR NO PAYLOAD DO CARCARA (chamado automaticamente pelo client)
   // ==========================================================================
 
   applyToPayload(payload: any): any {
@@ -80,7 +79,7 @@ export class ThinkingService {
   }
 
   // ==========================================================================
-  // SANDBOX - EXECUTA PRE-THINKING COM ACESSO À REDE
+  // SANDBOX - ENRIQUECE PROMPT COM ACESSO CONTROLADO À REDE
   // ==========================================================================
 
   async executeSandbox(prompt: string, context?: string): Promise<string> {
@@ -90,7 +89,6 @@ export class ThinkingService {
 
     const enriched: string[] = [prompt];
 
-    // Tool: web_search (se habilitada)
     if (this.config.sandboxTools.includes('web_search')) {
       try {
         const search = await this.searchService.duckDuckGo(prompt);
@@ -103,7 +101,6 @@ export class ThinkingService {
       } catch {}
     }
 
-    // Tool: get_time (se habilitada)
     if (this.config.sandboxTools.includes('get_time')) {
       try {
         const now = new Date();
@@ -111,7 +108,6 @@ export class ThinkingService {
       } catch {}
     }
 
-    // Tool: calculate (se habilitada e prompt tem expressão matemática)
     if (this.config.sandboxTools.includes('calculate')) {
       const mathExpr = this.extractMathExpression(prompt);
       if (mathExpr) {
@@ -122,7 +118,6 @@ export class ThinkingService {
       }
     }
 
-    // Se tem contexto anterior, adiciona
     if (context) {
       enriched.push(`\n[Contexto anterior]:\n${context}`);
     }
@@ -131,26 +126,7 @@ export class ThinkingService {
   }
 
   private extractMathExpression(text: string): string | null {
-    // Regex simples para capturar expressões matemáticas básicas
     const match = text.match(/([\d\s+\-*/().^]+=[\d\s+\-*/().^]+)/);
     return match ? match[1].trim() : null;
-  }
-
-  // ==========================================================================
-  // PERSISTÊNCIA (localStorage via LlamaUIConfigService)
-  // ==========================================================================
-
-  async saveToLocalStorage(llamaUI: LlamaUIConfigService): Promise<void> {
-    await llamaUI.setConfig({
-      enableThinking: this.config.enabled,
-      mcpRequestTimeoutSeconds: 300,
-    });
-  }
-
-  async loadFromLocalStorage(llamaUI: LlamaUIConfigService): Promise<void> {
-    const cfg = await llamaUI.getConfig();
-    if (cfg?.enableThinking !== undefined) {
-      this.config.enabled = cfg.enableThinking;
-    }
   }
 }
