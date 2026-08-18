@@ -1,0 +1,62 @@
+{
+  "name": "carcara",
+  "displayName": "Carcara - AI Agent Assistant",
+  "description": "Frontend para interagir com modelos Qwen, DeepSeek e agentes via Carcara Proxy",
+  "version": "1.0.0",
+  "publisher": "zeidlerneto1",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Machine Learning",
+    "Other"
+  ],
+  "activationEvents": [],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "carcara-sidebar",
+          "title": "Carcara AI",
+          "icon": "$(robot)"
+        }
+      ]
+    },
+    "views": {
+      "carcara-sidebar": [
+        {
+          "type": "webview",
+          "id": "carcara.chatView",
+          "name": "Carcara Chat"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "carcara.openPanel",
+        "title": "Carcara: Open Chat Panel"
+      },
+      {
+        "command": "carcara.newChat",
+        "title": "Carcara: New Chat"
+      },
+      {
+        "command": "carcara.configureModel",
+        "title": "Carcara: Configure Model"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.3.0"
+  },
+  "dependencies": {}
+}
