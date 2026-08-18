@@ -6,6 +6,7 @@ import pino from 'pino';
 import { Readable } from 'stream';
 import { LlamaUIConfigService } from './llama-ui-config.js';
 import { ThinkingService, ThinkingConfig } from './thinking-service.js';
+import { AgentLoopService, AgentLoopConfig, AgentLoopResult } from './agent-loop-service.js';
 import {
   CarcaraConfig, LlamaMessage, ConversationNode, ChatCompletionResponse,
   MCPListResponse, LoginPayload, ModelInfo, LoginScript, LoginStep, StoredSession
@@ -191,6 +192,7 @@ export class CarcaraClient {
   private recorder: LoginRecorder;
   private llamaUIConfig: LlamaUIConfigService;
   private thinkingService: ThinkingService;
+  private agentLoopService: AgentLoopService;
 
   private authToken: string | null = null;
   private phpsessid: string | null = null;
@@ -216,6 +218,7 @@ export class CarcaraClient {
     this.recorder = new LoginRecorder();
     this.llamaUIConfig = new LlamaUIConfigService();
     this.thinkingService = new ThinkingService();
+    this.agentLoopService = new AgentLoopService({ maxRolls: 5 });
   }
 
   // UMA unica instancia Axios com interceptor de cookies
@@ -1326,5 +1329,87 @@ export class CarcaraClient {
       this.llamaUIConfig.setPage(this.page);
     }
     return this.llamaUIConfig;
+  }
+
+  // ==========================================================================
+  // AGENT LOOP - Controle de Loop Engineering no Client-Side
+  // ==========================================================================
+
+  /**
+   * Configura o número máximo de rolls do agente (default: 5)
+   */
+  setAgentMaxRolls(maxRolls: number): void {
+    this.agentLoopService.setMaxRolls(maxRolls);
+  }
+
+  /**
+   * Atualiza configuração completa do agent loop
+   */
+  updateAgentLoopConfig(config: Partial<AgentLoopConfig>): void {
+    this.agentLoopService.updateConfig(config);
+  }
+
+  /**
+   * Executa loop de agente com múltiplos rolls automáticos
+   */
+  async executeAgentLoop(
+    task: string,
+    model?: string
+  ): Promise<AgentLoopResult> {
+    this.ensureInitialized();
+
+    const chatCompletionFn = async (prompt: string, config?: any): Promise<{
+      content: string;
+      toolCalls?: ToolCall[];
+      finishReason: string;
+    }> => {
+      const response = await this.chatCompletion(prompt, model, undefined);
+      const choice = response.choices[0];
+      return {
+        content: choice.message.content || '',
+        toolCalls: choice.message.tool_calls,
+        finishReason: choice.finish_reason,
+      };
+    };
+
+    return this.agentLoopService.executeLoop(task, chatCompletionFn);
+  }
+
+  /**
+   * Get current agent loop configuration
+   */
+  getAgentLoopConfig(): AgentLoopConfig {
+    return this.agentLoopService.getConfig();
+  }
+
+  /**
+   * Executa um único roll manualmente (controle fino)
+   */
+  async executeSingleAgentRoll(
+    task: string,
+    previousRolls?: any[],
+    model?: string
+  ): Promise<any> {
+    this.ensureInitialized();
+
+    const chatCompletionFn = async (prompt: string): Promise<{
+      content: string;
+      toolCalls?: ToolCall[];
+      finishReason: string;
+    }> => {
+      const response = await this.chatCompletion(prompt, model, undefined);
+      const choice = response.choices[0];
+      return {
+        content: choice.message.content || '',
+        toolCalls: choice.message.tool_calls,
+        finishReason: choice.finish_reason,
+      };
+    };
+
+    return this.agentLoopService.executeSingleRoll(
+      task,
+      previousRolls || [],
+      chatCompletionFn
+    );
   }
 }

@@ -1,51 +1,47 @@
+```
 # Dependencies
 node_modules/
-package-lock.json
-yarn.lock
-pnpm-lock.yaml
 
-# Build output
+# Build artifacts
 dist/
 build/
-*.tsbuildinfo
+target/
 
-# Environment variables (NEVER commit credentials!)
-.env
-.env.local
-.env.*.local
-
-# Carcara runtime data
-.carcara/
-.carcara/chats/
-.carcara/sandbox-runs/
-.carcara/*.json
-.carcara/*.log
+# Python specific
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.py.class
+.Python
+env/
+venv/
+.venv/
+.eggs/
+*.egg-info/
+.installed.cfg
+*.manifest
+*.spec
 
 # Logs
-logs/
 *.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
-lerna-debug.log*
 
-# Playwright
-test-results/
-playwright-report/
-playwright/.cache/
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
 
-# IDE
+# Editor files
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Temporary files
-*.tmp
-*.temp
-.cache/
+```
