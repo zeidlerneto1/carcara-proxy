@@ -1,5 +1,6 @@
 import pino from 'pino';
 import { ChatMessage, ToolCall } from './types.js';
+import { TagParserService } from './tag-parser-service.js';
 
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
 
@@ -8,6 +9,9 @@ export interface AgentLoopConfig {
   stopConditions?: string[];  // Condições de parada personalizadas
   enableToolUse?: boolean;    // Habilitar uso de ferramentas
   enableSelfReflection?: boolean; // Habilitar auto-reflexão
+  enableTagParsing?: boolean; // Habilitar parsing de tags estilo Kimi Chat
+  useTagsForTools?: boolean;  // Usar tags em vez de tool calls nativos
+  availableTools?: string[];  // Lista de tools disponíveis para o prompt
   temperature?: number;
   maxTokens?: number;
 }
@@ -47,6 +51,16 @@ export class AgentLoopService {
     ],
     enableToolUse: true,
     enableSelfReflection: true,
+    enableTagParsing: true,      // Novo: parsing de tags habilitado por padrão
+    useTagsForTools: true,       // Novo: usa tags em vez de tool calls nativos
+    availableTools: [
+      'search',
+      'browse',
+      'code',
+      'read_file',
+      'write_file',
+      'run_command',
+    ],
     temperature: 0.7,
     maxTokens: 4096,
   };
@@ -90,21 +104,30 @@ export class AgentLoopService {
   }
 
   /**
-   * Cria prompt de reflexão para próximo roll
+   * Cria prompt de reflexão para próximo roll com instruções de tags
    */
   private createReflectionPrompt(
     originalTask: string,
     previousRolls: AgentRollResult[]
   ): string {
+    // Gera system prompt com instruções de tags se habilitado
+    let systemPrompt = '';
+    if (this.config.enableTagParsing && this.config.useTagsForTools) {
+      systemPrompt = TagParserService.generateSystemPrompt({
+        availableTools: this.config.availableTools,
+        enableThinking: this.config.enableSelfReflection,
+      }) + '\n\n---\n';
+    }
+
     if (!this.config.enableSelfReflection || previousRolls.length === 0) {
-      return originalTask;
+      return systemPrompt + originalTask;
     }
 
     const reflectionContext = previousRolls.map((roll, idx) => 
-      `### Roll ${idx + 1}:\n${roll.content}\n${roll.toolCalls ? `\nFerramentas usadas: ${JSON.stringify(roll.toolCalls)}` : ''}`
+      `### Roll ${idx + 1}:\n${roll.content}\n${roll.toolCalls && roll.toolCalls.length > 0 ? `\nFerramentas usadas: ${JSON.stringify(roll.toolCalls)}` : ''}`
     ).join('\n\n');
 
-    return `[AGENT LOOP - Roll ${previousRolls.length + 1}/${this.config.maxRolls}]
+    return `${systemPrompt}[AGENT LOOP - Roll ${previousRolls.length + 1}/${this.config.maxRolls}]
 
 Tarefa Original: ${originalTask}
 
@@ -115,15 +138,15 @@ ${reflectionContext}
 Instruções:
 1. Analise o progresso até agora
 2. Identifique o que ainda falta fazer
-3. Execute próxima ação necessária
-4. Se tarefa completa, indique claramente "TASK COMPLETED"
+3. Execute próxima ação necessária usando TAGS apropriadas
+4. Se tarefa completa, use <final>...</final>
 5. Se precisa de mais iterações, continue com próxima ação
 
 Resposta:`;
   }
 
   /**
-   * Executa loop completo do agente
+   * Executa loop completo do agente com parsing de tags
    */
   async executeLoop(
     initialTask: string,
@@ -147,19 +170,36 @@ Resposta:`;
           maxTokens: this.config.maxTokens,
         });
 
+        // Parseia tags da resposta se habilitado
+        let toolCalls = response.toolCalls || [];
+        let parsedContent = response.content;
+        
+        if (this.config.enableTagParsing && this.config.useTagsForTools) {
+          const parseResult = TagParserService.parse(response.content);
+          
+          // Usa tool calls extraídos das tags
+          if (parseResult.hasToolCalls && parseResult.toolCalls.length > 0) {
+            toolCalls = parseResult.toolCalls;
+            logger.info({ tagsFound: parseResult.tags.length }, 'Tags parsed and converted to tool calls');
+          }
+          
+          // Usa texto limpo (sem tags) como conteúdo
+          parsedContent = parseResult.plainText;
+        }
+
         const rollResult: AgentRollResult = {
           rollNumber: rollNum,
-          content: response.content,
-          toolCalls: response.toolCalls,
+          content: parsedContent,
+          toolCalls,
           finishReason: response.finishReason,
           needsAnotherRoll: false,
         };
 
         rolls.push(rollResult);
-        finalContent = response.content;
+        finalContent = parsedContent;
 
         // Verifica condições de parada
-        const stopCheck = this.shouldStop(response.content, rollNum);
+        const stopCheck = this.shouldStop(parsedContent, rollNum);
         if (stopCheck.stop) {
           stoppedByCondition = stopCheck.reason;
           logger.info({ reason: stopCheck.reason, roll: rollNum }, 'Agent loop stopped');
@@ -167,10 +207,11 @@ Resposta:`;
         }
 
         // Se tem tool calls, processa e continua
-        if (response.toolCalls && response.toolCalls.length > 0 && this.config.enableToolUse) {
+        if (toolCalls.length > 0 && this.config.enableToolUse) {
           rollResult.needsAnotherRoll = true;
+          logger.info({ toolCallsCount: toolCalls.length }, 'Tool calls detected, another roll needed');
           // Aqui você executaria as tools e atualizaria currentTask
-          // currentTask = await this.executeTools(response.toolCalls);
+          // currentTask = await this.executeTools(toolCalls);
         }
 
       } catch (error: any) {
