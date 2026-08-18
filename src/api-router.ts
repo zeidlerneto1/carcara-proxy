@@ -9,6 +9,8 @@ import { SearchService } from './search-service.js';
 import { LlamaUIConfigService, MCPServerConfig } from './llama-ui-config.js';
 import { SandboxService, SandboxLanguage } from './sandbox-service.js';
 import { LocalSandboxService, LocalSandboxLanguage } from './sandbox-local.js';
+import { TagParserService } from './tag-parser-service.js';
+import { LocalToolExecutor } from './local-tool-executor.js';
 
 import { ChatMessage, ToolCall } from './types.js';
 import { Readable } from 'stream';
@@ -33,6 +35,7 @@ export class CarcaraRouter {
   private searchService: SearchService;
   private sandboxService: SandboxService;
   private localSandboxService: LocalSandboxService;
+  private toolExecutor: LocalToolExecutor;
   private port: number;
 
   constructor(port: number = 3030) {
@@ -41,6 +44,7 @@ export class CarcaraRouter {
     this.searchService = new SearchService();
     this.sandboxService = new SandboxService();
     this.localSandboxService = new LocalSandboxService();
+    this.toolExecutor = new LocalToolExecutor(process.cwd());
     this.app = express();
   }
 
@@ -431,6 +435,122 @@ export class CarcaraRouter {
     });
 
     this.app.get('/ping', (_req: Request, res: Response) => res.json({ pong: true }));
+
+    // ==========================================
+    // AGENT LOOP - Tool Execution via Tags
+    // ==========================================
+
+    this.app.post('/api/agent/execute-tools', async (req: Request, res: Response) => {
+      try {
+        const { toolCalls } = req.body;
+        
+        if (!toolCalls || !Array.isArray(toolCalls)) {
+          return res.status(400).json({ error: 'toolCalls array is required' });
+        }
+
+        console.log(`[AgentLoop] Executing ${toolCalls.length} tool calls`);
+        
+        const results = [];
+        for (const toolCall of toolCalls) {
+          const { function: fn } = toolCall;
+          if (!fn) continue;
+          
+          const { name, arguments: argsStr } = fn;
+          const args = typeof argsStr === 'string' ? JSON.parse(argsStr) : argsStr;
+          
+          console.log(`[AgentLoop] Executing tool: ${name}`, args);
+          
+          let result;
+          switch (name) {
+            case 'file_read':
+            case 'read_file':
+              result = await this.toolExecutor.readFile(args.path || args.file || args.input);
+              break;
+            
+            case 'file_write':
+            case 'write_file':
+              result = await this.toolExecutor.writeFile(
+                args.path || args.file, 
+                args.content || args.input
+              );
+              break;
+            
+            case 'shell_command':
+            case 'run_command':
+              result = await this.toolExecutor.runCommand(
+                args.command || args.input,
+                args.timeout || 30000
+              );
+              break;
+            
+            case 'web_search':
+            case 'search':
+              result = await this.toolExecutor.searchWeb(args.query || args.input);
+              break;
+            
+            case 'browser_navigate':
+            case 'browse':
+              result = await this.toolExecutor.browseUrl(args.url || args.input);
+              break;
+            
+            default:
+              result = {
+                success: false,
+                error: `Tool not found: ${name}`
+              };
+          }
+          
+          results.push({
+            tool_call_id: toolCall.id,
+            name,
+            ...result
+          });
+        }
+
+        res.json({ results });
+      } catch (error: any) {
+        console.error('[AgentLoop] Tool execution error:', error.message);
+        res.status(500).json({ error: error.message });
+      }
+    });
+
+    this.app.post('/api/agent/parse-tags', async (req: Request, res: Response) => {
+      try {
+        const { content, enableTagParsing } = req.body;
+        
+        if (!content) {
+          return res.status(400).json({ error: 'content is required' });
+        }
+
+        if (!enableTagParsing) {
+          return res.json({ tags: [], plainText: content, hasToolCalls: false, toolCalls: [] });
+        }
+
+        const parseResult = TagParserService.parse(content);
+        console.log(`[AgentLoop] Parsed ${parseResult.tags.length} tags from response`);
+        
+        res.json(parseResult);
+      } catch (error: any) {
+        console.error('[AgentLoop] Tag parsing error:', error.message);
+        res.status(500).json({ error: error.message });
+      }
+    });
+
+    this.app.get('/api/agent/system-prompt', async (req: Request, res: Response) => {
+      try {
+        const { tools } = req.query;
+        const availableTools = tools ? String(tools).split(',') : undefined;
+        
+        const systemPrompt = TagParserService.generateSystemPrompt({
+          availableTools,
+          enableThinking: true
+        });
+        
+        res.json({ systemPrompt });
+      } catch (error: any) {
+        res.status(500).json({ error: error.message });
+      }
+    });
 
     this.app.get('/api/debug/conversations', async (_req: Request, res: Response) => {
       try {
