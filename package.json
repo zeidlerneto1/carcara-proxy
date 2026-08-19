@@ -1,6 +1,6 @@
 {
   "name": "carcara-lncc-client",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Cliente API e Chat para Carcara LNCC - OpenRouter Wrapper",
   "main": "dist/server.js",
   "type": "module",
