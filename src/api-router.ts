@@ -7,23 +7,22 @@ import { CarcaraClient } from './carcara-client.js';
 import { customMCPTools } from './mcp-tools.js';
 import { SearchService } from './search-service.js';
 import { LlamaUIConfigService, MCPServerConfig } from './llama-ui-config.js';
-import { SandboxService, SandboxLanguage } from './sandbox-service.js';
-import { LocalSandboxService, LocalSandboxLanguage } from './sandbox-local.js';
-
-import { ChatMessage, ToolCall } from './types.js';
+import { SandboxService } from './sandbox-service.js';
+import { AgentEngine } from './agent-engine.js';
+import { MemoryService } from './memory-service.js';
+import { MetricsService } from './metrics-service.js';
+import { registerAllAgents } from './agents/index.js';
+import { ChatMessage, ToolCall, AgentTask, CodeTaskInput } from './types.js';
 import { Readable } from 'stream';
 
 const limiter = rateLimit({
-  windowMs: 1 * 60 * 1000,
-  max: 120,
-  standardHeaders: true,
-  legacyHeaders: false,
+  windowMs: 1 * 60 * 1000, max: 120,
+  standardHeaders: true, legacyHeaders: false,
   message: { error: 'Too many requests, please try again later' },
 });
 
 const strictLimiter = rateLimit({
-  windowMs: 1 * 60 * 1000,
-  max: 30,
+  windowMs: 1 * 60 * 1000, max: 30,
   message: { error: 'Rate limit exceeded for chat endpoint' },
 });
 
@@ -32,15 +31,20 @@ export class CarcaraRouter {
   private client: CarcaraClient;
   private searchService: SearchService;
   private sandboxService: SandboxService;
-  private localSandboxService: LocalSandboxService;
+  private agentEngine: AgentEngine;
+  private memoryService: MemoryService;
+  private metricsService: MetricsService;
   private port: number;
+  private dockerAvailable: boolean = false;
 
   constructor(port: number = 3030) {
     this.port = port;
     this.client = new CarcaraClient({ domain: 'LNCC' });
     this.searchService = new SearchService();
     this.sandboxService = new SandboxService();
-    this.localSandboxService = new LocalSandboxService();
+    this.agentEngine = new AgentEngine();
+    this.memoryService = new MemoryService();
+    this.metricsService = new MetricsService();
     this.app = express();
   }
 
@@ -48,33 +52,40 @@ export class CarcaraRouter {
     if (!content) return '';
     if (typeof content === 'string') return content;
     if (Array.isArray(content)) {
-      return content
-        .map((part: any) => {
-          if (typeof part === 'string') return part;
-          if (part?.type === 'text') return part.text || '';
-          if (part?.text) return part.text;
-          return '';
-        })
-        .filter(Boolean)
-        .join('\n');
+      return content.map((part: any) => {
+        if (typeof part === 'string') return part;
+        if (part?.type === 'text') return part.text || '';
+        if (part?.text) return part.text;
+        return '';
+      }).filter(Boolean).join('\n');
     }
     return String(content);
   }
 
+  /** Detecta se Docker esta disponivel no startup */
+  private async detectEnvironment(): Promise<void> {
+    this.dockerAvailable = await this.sandboxService.detectDocker();
+    logger.info({ dockerAvailable: this.dockerAvailable }, 'Ambiente detectado');
+
+    // Registra agentes
+    registerAllAgents(this.agentEngine, this.client, this.memoryService, this.metricsService);
+    this.client.setAgentEngine(this.agentEngine);
+    this.client.setMemoryService(this.memoryService);
+    this.client.setMetricsService(this.metricsService);
+  }
+
   async start(): Promise<void> {
+    await this.detectEnvironment();
+
     // ==========================================
-    // MIDDLEWARE (otimizado)
+    // MIDDLEWARE
     // ==========================================
-    this.app.use(helmet({
-      contentSecurityPolicy: false,
-      crossOriginEmbedderPolicy: false,
-    }));
+    this.app.use(helmet({ contentSecurityPolicy: false, crossOriginEmbedderPolicy: false }));
     this.app.use(cors());
     this.app.use(compression());
     this.app.use(express.json({ limit: '10mb' }));
     this.app.use(limiter);
 
-    // Request logging leve
     this.app.use((req: Request, _res: Response, next) => {
       console.log(`${new Date().toISOString()} ${req.method} ${req.url}`);
       next();
@@ -89,59 +100,40 @@ export class CarcaraRouter {
         const models = await this.client.getAvailableModels();
         res.json({
           object: 'list',
-          data: models.map(m => ({
-            id: m.id,
-            object: 'model',
-            created: Math.floor(Date.now() / 1000),
-            owned_by: 'carcara-lncc',
-          })),
+          data: models.map(m => ({ id: m.id, object: 'model', created: Math.floor(Date.now() / 1000), owned_by: 'carcara-lncc' })),
         });
-      } catch (error: any) {
-        res.status(500).json({ error: error.message });
-      }
+      } catch (error: any) { res.status(500).json({ error: error.message }); }
     });
 
-    // Chat completions com streaming otimizado
+    // Chat completions com deteccao de agente integrada
     this.app.post('/v1/chat/completions', strictLimiter, async (req: Request, res: Response) => {
       try {
         const { model, messages, stream, tools } = req.body;
         const msgs: ChatMessage[] = messages || [];
-
-        if (!msgs.length) {
-          return res.status(400).json({ error: 'Messages are required' });
-        }
+        if (!msgs.length) return res.status(400).json({ error: 'Messages are required' });
 
         const completionId = `chatcmpl-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
         const created = Math.floor(Date.now() / 1000);
         const modelName = model || this.client.getDefaultModel();
 
-        // Monta prompt com historico (ultimas 4 msgs)
+        // Monta prompt
         const systemMsg = msgs.find(m => m.role === 'system');
         const recentMsgs = msgs.slice(-4);
         const parts: string[] = [];
-
-        if (systemMsg) {
-          parts.push(`System: ${this.extractText(systemMsg.content)}`);
-        }
+        if (systemMsg) parts.push(`System: ${this.extractText(systemMsg.content)}`);
 
         for (const m of recentMsgs) {
           let text = this.extractText(m.content);
           if (!text) continue;
           const isLast = m === recentMsgs[recentMsgs.length - 1];
-          if (!isLast && text.length > 1000) {
-            text = text.substring(0, 1000);
-          }
+          if (!isLast && text.length > 1000) text = text.substring(0, 1000);
           switch (m.role) {
             case 'user': parts.push(`User: ${text}`); break;
             case 'assistant':
               parts.push(`Assistant: ${text}`);
-              if (m.tool_calls?.length) {
-                parts.push(`Tools: ${JSON.stringify(m.tool_calls).substring(0, 500)}`);
-              }
+              if (m.tool_calls?.length) parts.push(`Tools: ${JSON.stringify(m.tool_calls).substring(0, 500)}`);
               break;
-            case 'tool':
-              parts.push(`Tool: ${isLast ? text : text.substring(0, 2000)}`);
-              break;
+            case 'tool': parts.push(`Tool: ${isLast ? text : text.substring(0, 2000)}`); break;
           }
         }
 
@@ -149,13 +141,43 @@ export class CarcaraRouter {
         const lastMsg = recentMsgs[recentMsgs.length - 1];
         console.log(`Prompt: ${prompt.length} chars | ${this.extractText(lastMsg.content).substring(0, 80)}`);
 
+        // === DETECCAO DE AGENTE ===
+        const agentResult = await this.client.thinking.detectAndRunAgent(this.extractText(lastMsg.content));
+        if (agentResult !== null) {
+          // Retorna resultado do agente como mensagem do assistant
+          if (stream) {
+            res.setHeader('Content-Type', 'text/event-stream');
+            res.setHeader('Cache-Control', 'no-cache');
+            res.setHeader('Connection', 'keep-alive');
+            res.setHeader('X-Accel-Buffering', 'no');
+            res.flushHeaders();
+
+            // Streama o resultado do agente em chunks
+            const CHUNK_SIZE = 20;
+            for (let i = 0; i < agentResult.length; i += CHUNK_SIZE) {
+              const chunk = agentResult.slice(i, i + CHUNK_SIZE);
+              const delta = i === 0 ? { role: 'assistant', content: chunk } : { content: chunk };
+              res.write(`data: ${JSON.stringify({ id: completionId, object: 'chat.completion.chunk', created, model: modelName, choices: [{ index: 0, delta, finish_reason: null }] })}\n\n`);
+            }
+            res.write(`data: ${JSON.stringify({ id: completionId, object: 'chat.completion.chunk', created, model: modelName, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\n`);
+            res.write('data: [DONE]\n\n');
+            return res.end();
+          } else {
+            res.json({
+              id: completionId, object: 'chat.completion', created, model: modelName,
+              choices: [{ index: 0, message: { role: 'assistant', content: agentResult }, finish_reason: 'stop' }],
+              usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+            });
+            return;
+          }
+        }
+
+        // === FLUXO NORMAL (sem agente) ===
         const response = await this.client.chatCompletion(prompt, model, tools);
         const content = response?.choices?.[0]?.message?.content || '';
         const toolCalls: ToolCall[] | undefined = response?.choices?.[0]?.message?.tool_calls;
-
         console.log(`Response: ${content.length} chars`);
 
-        // STREAMING SSE REAL - proxy direto do LNCC
         if (stream) {
           res.setHeader('Content-Type', 'text/event-stream');
           res.setHeader('Cache-Control', 'no-cache');
@@ -164,90 +186,52 @@ export class CarcaraRouter {
           res.flushHeaders();
 
           try {
-            // Faz request ao LNCC com stream=true e pipeia direto
-            const lnccStream = await this.client.chatCompletionStream(
-              prompt, model, tools
-            );
-
-            lnccStream.on('data', (chunk: Buffer) => {
-              res.write(chunk);
-            });
-
-            lnccStream.on('end', () => {
-              res.end();
-            });
-
+            const lnccStream = await this.client.chatCompletionStream(prompt, model, tools);
+            lnccStream.on('data', (chunk: Buffer) => { res.write(chunk); });
+            lnccStream.on('end', () => { res.end(); });
             lnccStream.on('error', (err: any) => {
               console.error('Stream error:', err.message);
               res.write(`data: ${JSON.stringify({ error: err.message })}\n\n`);
               res.end();
             });
-
-            // Se cliente fecha conexão, aborta stream
-            req.on('close', () => {
-              lnccStream.destroy?.();
-            });
-
+            req.on('close', () => { lnccStream.destroy?.(); });
             return;
           } catch (err: any) {
             console.error('Streaming failed, falling back:', err.message);
-            // Fallback: streaming simulado
             const CHUNK_SIZE = 20;
             for (let i = 0; i < content.length; i += CHUNK_SIZE) {
               const chunk = content.slice(i, i + CHUNK_SIZE);
               const delta = i === 0 ? { role: 'assistant', content: chunk } : { content: chunk };
-              res.write(`data: ${JSON.stringify({
-                id: completionId, object: 'chat.completion.chunk', created, model: modelName,
-                choices: [{ index: 0, delta, finish_reason: null }],
-              })}\n\n`);
+              res.write(`data: ${JSON.stringify({ id: completionId, object: 'chat.completion.chunk', created, model: modelName, choices: [{ index: 0, delta, finish_reason: null }] })}\n\n`);
             }
-            res.write(`data: ${JSON.stringify({
-              id: completionId, object: 'chat.completion.chunk', created, model: modelName,
-              choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
-            })}\n\n`);
+            res.write(`data: ${JSON.stringify({ id: completionId, object: 'chat.completion.chunk', created, model: modelName, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\n`);
             res.write('data: [DONE]\n\n');
             return res.end();
           }
         }
 
-        // Nao-streaming
         res.json({
-          id: completionId,
-          object: 'chat.completion',
-          created,
-          model: modelName,
-          choices: [{
-            index: 0,
-            message: { role: 'assistant', content, tool_calls: toolCalls },
-            finish_reason: toolCalls?.length ? 'tool_calls' : 'stop',
-          }],
+          id: completionId, object: 'chat.completion', created, model: modelName,
+          choices: [{ index: 0, message: { role: 'assistant', content, tool_calls: toolCalls }, finish_reason: toolCalls?.length ? 'tool_calls' : 'stop' }],
           usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
         });
-
       } catch (error: any) {
         console.error('Chat completion error:', error.message);
         res.status(500).json({ error: { message: error.message, type: 'api_error' } });
       }
     });
 
-
-    // Continue generation (quebra limite de tokens)
+    // Continue generation
     this.app.post('/v1/chat/completions/continue', strictLimiter, async (req: Request, res: Response) => {
       try {
         const { model, messages, tools } = req.body;
         const msgs: ChatMessage[] = messages || [];
         if (!msgs.length) return res.status(400).json({ error: 'Messages are required' });
-
         const lastUser = msgs.filter(m => m.role === 'user').pop();
         if (!lastUser) return res.status(400).json({ error: 'No user message' });
-
-        const response = await this.client.chatCompletionWithContinue(
-          lastUser.content, model, tools
-        );
+        const response = await this.client.chatCompletionWithContinue(lastUser.content, model, tools);
         res.json(response);
-      } catch (error: any) {
-        res.status(500).json({ error: error.message });
-      }
+      } catch (error: any) { res.status(500).json({ error: error.message }); }
     });
 
     // Embeddings
@@ -257,47 +241,26 @@ export class CarcaraRouter {
         const inputs = Array.isArray(input) ? input : [input];
         res.json({
           object: 'list',
-          data: inputs.map((_: any, i: number) => ({
-            object: 'embedding',
-            embedding: new Array(1536).fill(0),
-            index: i,
-          })),
+          data: inputs.map((_: any, i: number) => ({ object: 'embedding', embedding: new Array(1536).fill(0), index: i })),
           model: model || 'Qwen3.6-35B',
           usage: { prompt_tokens: 0, total_tokens: 0 },
         });
-      } catch (error: any) {
-        res.status(500).json({ error: error.message });
-      }
+      } catch (error: any) { res.status(500).json({ error: error.message }); }
     });
 
     // ==========================================
-    // OLLAMA, MCP, SEARCH, DEBUG
+    // OLLAMA COMPATIBLE
     // ==========================================
 
     this.app.get('/api/health', (_req: Request, res: Response) => {
-      res.json({ status: 'ok', initialized: this.client.isReady });
+      res.json({ status: 'ok', initialized: this.client.isReady, docker: this.dockerAvailable });
     });
 
     this.app.get('/api/tags', async (_req: Request, res: Response) => {
       try {
         const models = await this.client.getAvailableModels();
-        res.json({
-          models: models.map(m => ({
-            name: m.id,
-            model: m.id,
-            modified_at: new Date().toISOString(),
-            size: 0,
-            digest: m.id,
-            details: {
-              format: 'gguf',
-              family: 'llama',
-              parameter_size: m.id.includes('70b') ? '70B' : m.id.includes('35B') ? '35B' : 'unknown',
-            },
-          })),
-        });
-      } catch (error: any) {
-        res.status(500).json({ error: error.message });
-      }
+        res.json({ models: models.map(m => ({ name: m.id, model: m.id, modified_at: new Date().toISOString(), size: 0 })) });
+      } catch (error: any) { res.status(500).json({ error: error.message }); }
     });
 
     this.app.post('/api/show', async (req: Request, res: Response) => {
@@ -306,111 +269,104 @@ export class CarcaraRouter {
         const models = await this.client.getAvailableModels();
         const model = models.find(m => m.id === name);
         if (!model) return res.status(404).json({ error: 'Model not found' });
-        res.json({
-          license: 'LNCC License',
-          modelfile: `# ${model.name}`,
-          parameters: '',
-          template: '',
-          details: { format: 'gguf', family: 'llama' },
-          model_info: model,
-        });
-      } catch (error: any) {
-        res.status(500).json({ error: error.message });
-      }
+        res.json({ license: 'MIT', modelfile: '', parameters: '', template: '', details: { parent_model: '', format: 'gguf', family: 'qwen', families: ['qwen'], parameter_size: '35B', quantization_level: 'Q4_K_M' } });
+      } catch (error: any) { res.status(500).json({ error: error.message }); }
     });
 
     this.app.post('/api/generate', strictLimiter, async (req: Request, res: Response) => {
       try {
-        const { model, prompt, system } = req.body;
-        if (!prompt) return res.status(400).json({ error: 'Prompt is required' });
-        const fullPrompt = system ? `${system}\n\n${prompt}` : prompt;
-        const response = await this.client.chatCompletion(fullPrompt, model);
-        res.json({
-          model: model || 'Qwen3.6-35B',
-          created_at: new Date().toISOString(),
-          response: response.choices[0].message.content,
-          done: true,
-        });
-      } catch (error: any) {
-        res.status(500).json({ error: error.message });
-      }
+        const { model, prompt, stream } = req.body;
+        const response = await this.client.chatCompletion(prompt, model);
+        const content = response.choices[0].message.content;
+
+        if (stream) {
+          res.setHeader('Content-Type', 'application/x-ndjson');
+          res.flushHeaders();
+          const CHUNK_SIZE = 20;
+          for (let i = 0; i < content.length; i += CHUNK_SIZE) {
+            res.write(JSON.stringify({ model, created_at: new Date().toISOString(), response: content.slice(i, i + CHUNK_SIZE), done: false }) + '\n');
+          }
+          res.write(JSON.stringify({ model, created_at: new Date().toISOString(), response: '', done: true }) + '\n');
+          return res.end();
+        }
+        res.json({ model, created_at: new Date().toISOString(), response: content, done: true });
+      } catch (error: any) { res.status(500).json({ error: error.message }); }
     });
 
     this.app.post('/api/chat', strictLimiter, async (req: Request, res: Response) => {
       try {
-        const { model, messages } = req.body;
-        const msgs: ChatMessage[] = messages || [];
-        if (!msgs.length) return res.status(400).json({ error: 'Messages are required' });
-        const lastUserMsg = msgs.filter(m => m.role === 'user').pop();
-        if (!lastUserMsg) return res.status(400).json({ error: 'No user message found' });
-        const response = await this.client.chatCompletion(lastUserMsg.content, model);
-        res.json({
-          model: model || 'Qwen3.6-35B',
-          created_at: new Date().toISOString(),
-          message: { role: 'assistant', content: response.choices[0].message.content },
-          done: true,
-          total_duration: 0,
-          load_duration: 0,
-        });
-      } catch (error: any) {
-        res.status(500).json({ error: error.message });
-      }
+        const { model, messages, stream } = req.body;
+        const prompt = messages.map((m: ChatMessage) => `${m.role}: ${this.extractText(m.content)}`).join('\n');
+
+        // Deteccao de agente
+        const lastUserMsg = messages.filter((m: ChatMessage) => m.role === 'user').pop();
+        if (lastUserMsg) {
+          const agentResult = await this.client.thinking.detectAndRunAgent(this.extractText(lastUserMsg.content));
+          if (agentResult !== null) {
+            if (stream) {
+              res.setHeader('Content-Type', 'application/x-ndjson');
+              res.flushHeaders();
+              const CHUNK_SIZE = 20;
+              for (let i = 0; i < agentResult.length; i += CHUNK_SIZE) {
+                res.write(JSON.stringify({ model, created_at: new Date().toISOString(), message: { role: 'assistant', content: agentResult.slice(i, i + CHUNK_SIZE) }, done: false }) + '\n');
+              }
+              res.write(JSON.stringify({ model, created_at: new Date().toISOString(), message: { role: 'assistant', content: '' }, done: true }) + '\n');
+              return res.end();
+            }
+            res.json({ model, created_at: new Date().toISOString(), message: { role: 'assistant', content: agentResult }, done: true });
+            return;
+          }
+        }
+
+        const response = await this.client.chatCompletion(prompt, model);
+        const content = response.choices[0].message.content;
+
+        if (stream) {
+          res.setHeader('Content-Type', 'application/x-ndjson');
+          res.flushHeaders();
+          const CHUNK_SIZE = 20;
+          for (let i = 0; i < content.length; i += CHUNK_SIZE) {
+            res.write(JSON.stringify({ model, created_at: new Date().toISOString(), message: { role: 'assistant', content: content.slice(i, i + CHUNK_SIZE) }, done: false }) + '\n');
+          }
+          res.write(JSON.stringify({ model, created_at: new Date().toISOString(), message: { role: 'assistant', content: '' }, done: true }) + '\n');
+          return res.end();
+        }
+        res.json({ model, created_at: new Date().toISOString(), message: { role: 'assistant', content }, done: true });
+      } catch (error: any) { res.status(500).json({ error: error.message }); }
     });
 
     this.app.post('/api/embed', async (req: Request, res: Response) => {
-      const { input } = req.body;
-      if (!input) return res.status(400).json({ error: 'Input is required' });
-      res.json({
-        model: 'Qwen3.6-35B',
-        embeddings: [[0]],
-        total_duration: 0,
-        load_duration: 0,
-        prompt_eval_count: 0,
-      });
+      try {
+        const { model, input } = req.body;
+        const inputs = Array.isArray(input) ? input : [input];
+        res.json({ embeddings: inputs.map(() => new Array(1536).fill(0)) });
+      } catch (error: any) { res.status(500).json({ error: error.message }); }
     });
 
-    this.app.get('/api/conversations/:id/export', async (req: Request, res: Response) => {
-      try {
-        const filePath = await this.client.saveConversationToFile(req.params.id);
-        res.json({ success: true, path: filePath });
-      } catch (error: any) {
-        res.status(500).json({ error: error.message });
-      }
-    });
+    // ==========================================
+    // MCP TOOLS
+    // ==========================================
 
     this.app.get('/mcp/list', async (_req: Request, res: Response) => {
       try {
-        const carcaraTools = await this.client.listSdumontTools();
-        const carcaraToolList = carcaraTools?.result?.tools || [];
-        const customTools = customMCPTools.map(t => ({
-          name: t.name,
-          description: t.description,
-          inputSchema: t.inputSchema,
-        }));
-        res.json({ tools: [...customTools, ...carcaraToolList] });
-      } catch {
-        res.json({ tools: customMCPTools.map(t => ({
-          name: t.name,
-          description: t.description,
-          inputSchema: t.inputSchema,
-        })) });
-      }
+        const tools = await this.client.listSdumontTools();
+        const custom = customMCPTools.map(t => ({ name: t.name, description: t.description, inputSchema: t.inputSchema }));
+        res.json({ tools: [...(tools?.result?.tools || []), ...custom] });
+      } catch (error: any) { res.status(500).json({ error: error.message }); }
     });
 
     this.app.post('/mcp/call', async (req: Request, res: Response) => {
       try {
-        const { name, arguments: args } = req.body;
-        const customTool = customMCPTools.find(t => t.name === name);
-        if (customTool) {
-          return res.json({ result: await customTool.handler(args || {}) });
-        }
-        res.json({
-          result: await this.client.callMcpTool('lncc-sdumont', 'tools/call', { name, arguments: args }),
-        });
-      } catch (error: any) {
-        res.status(500).json({ error: error.message });
-      }
+        const { server, method, params } = req.body;
+        if (!server || !method) return res.status(400).json({ error: 'server and method are required' });
+        const result = await this.client.callMcpTool(server, method, params);
+        res.json(result);
+      } catch (error: any) { res.status(500).json({ error: error.message }); }
     });
+
+    // ==========================================
+    // SEARCH
+    // ==========================================
 
     this.app.post('/api/search', async (req: Request, res: Response) => {
       const { query, providers } = req.body;
@@ -441,39 +397,28 @@ export class CarcaraRouter {
           const messages = await this.client.getConversationMessages(conv.id);
           const msgArray = Array.isArray(messages) ? messages : [];
           debug.push({
-            id: conv.id,
-            name: conv.name,
+            id: conv.id, name: conv.name,
             lastModified: new Date(conv.lastModified).toISOString(),
             currNode: conv.currNode,
             mcpServers: conv.mcpServerOverrides?.length || 0,
             thinkingEnabled: conv.thinkingEnabled,
             totalMessages: msgArray.length,
-            messages: msgArray.slice(-5).map(m => ({
-              role: m.role,
-              type: m.type,
-              content: m.content?.substring(0, 200) || '',
-            })),
+            messages: msgArray.slice(-5).map(m => ({ role: m.role, type: m.type, content: m.content?.substring(0, 200) || '' })),
           });
         }
         res.json({ total: debug.length, conversations: debug });
-      } catch {
-        res.json({ total: 0, conversations: [] });
-      }
+      } catch { res.json({ total: 0, conversations: [] }); }
     });
 
-
-
     // ==========================================
-    // ARVORE DE MENSAGENS (parent/children)
+    // ARVORE DE MENSAGENS
     // ==========================================
 
     this.app.get('/api/conversations/:id/tree', async (req: Request, res: Response) => {
       try {
         const messages = await this.client.getMessageTree(req.params.id);
         res.json({ conversationId: req.params.id, messages });
-      } catch (error: any) {
-        res.status(500).json({ error: error.message });
-      }
+      } catch (error: any) { res.status(500).json({ error: error.message }); }
     });
 
     this.app.get('/api/messages/:msgId', async (req: Request, res: Response) => {
@@ -481,64 +426,46 @@ export class CarcaraRouter {
         const msg = await this.client.getMessageById(req.params.msgId);
         if (!msg) return res.status(404).json({ error: 'Message not found' });
         res.json(msg);
-      } catch (error: any) {
-        res.status(500).json({ error: error.message });
-      }
+      } catch (error: any) { res.status(500).json({ error: error.message }); }
     });
 
-
     // ==========================================
-    // SANDBOX (Docker + Local fallback)
+    // SANDBOX (Docker apenas - detectado no startup)
     // ==========================================
 
     this.app.get('/api/sandbox/status', async (_req: Request, res: Response) => {
       try {
-        const dockerAvailable = await this.sandboxService.isDockerAvailable();
-        const localAvailable = await this.localSandboxService.isLanguageAvailable('python');
+        const dockerAvailable = this.dockerAvailable;
         res.json({
           dockerAvailable,
-          localAvailable,
           dockerConfig: this.sandboxService.getConfig(),
-          localConfig: this.localSandboxService.getConfig(),
-          mode: dockerAvailable ? 'docker' : 'local',
+          mode: dockerAvailable ? 'docker' : 'unavailable',
+          agents: this.agentEngine.list().map(a => ({ id: a.id, name: a.name, capabilities: a.capabilities })),
         });
-      } catch (error: any) {
-        res.status(500).json({ error: error.message });
-      }
+      } catch (error: any) { res.status(500).json({ error: error.message }); }
     });
 
     this.app.post('/api/sandbox/exec', async (req: Request, res: Response) => {
       try {
-        const { code, language, timeout, memory, forceLocal } = req.body;
+        const { code, language, timeout, memory } = req.body;
         if (!code) return res.status(400).json({ error: 'code is required' });
         if (!language) return res.status(400).json({ error: 'language is required' });
 
-        // Docker languages
-        const dockerLangs: SandboxLanguage[] = ['python', 'javascript', 'typescript', 'bash', 'sh'];
-        // Local languages (includes cmd for Windows)
-        const localLangs: LocalSandboxLanguage[] = ['python', 'javascript', 'bash', 'sh', 'cmd'];
-
-        const useDocker = !forceLocal && await this.sandboxService.isDockerAvailable();
-
-        if (useDocker) {
-          if (!dockerLangs.includes(language)) {
-            return res.status(400).json({ error: `Docker sandbox: language must be one of: ${dockerLangs.join(', ')}` });
-          }
-          if (timeout) this.sandboxService.setConfig({ timeoutMs: timeout });
-          if (memory) this.sandboxService.setConfig({ memoryLimitMb: memory });
-          const result = await this.sandboxService.execute(code, language);
-          return res.json({ ...result, mode: 'docker' });
-        } else {
-          if (!localLangs.includes(language)) {
-            return res.status(400).json({ error: `Local sandbox: language must be one of: ${localLangs.join(', ')}` });
-          }
-          if (timeout) this.localSandboxService.setConfig({ timeoutMs: timeout });
-          const result = await this.localSandboxService.execute(code, language as LocalSandboxLanguage);
-          return res.json({ ...result, mode: 'local' });
+        if (!this.dockerAvailable) {
+          return res.status(503).json({ error: 'Docker nao disponivel. Sandbox desabilitado.' });
         }
-      } catch (error: any) {
-        res.status(500).json({ error: error.message });
-      }
+
+        const dockerLangs = ['python', 'javascript', 'typescript', 'bash', 'sh'];
+        if (!dockerLangs.includes(language)) {
+          return res.status(400).json({ error: `Linguagem deve ser uma de: ${dockerLangs.join(', ')}` });
+        }
+
+        if (timeout) this.sandboxService.setConfig({ timeoutMs: timeout });
+        if (memory) this.sandboxService.setConfig({ memoryLimitMb: memory });
+
+        const result = await this.sandboxService.execute(code, language);
+        res.json({ ...result, mode: 'docker' });
+      } catch (error: any) { res.status(500).json({ error: error.message }); }
     });
 
     this.app.post('/api/sandbox/config', async (req: Request, res: Response) => {
@@ -551,50 +478,57 @@ export class CarcaraRouter {
           ...(networkEnabled !== undefined && { networkEnabled }),
           ...(allowedLanguages !== undefined && { allowedLanguages }),
         });
-        this.localSandboxService.setConfig({
-          ...(timeoutMs !== undefined && { timeoutMs }),
-          ...(memoryLimitMb !== undefined && { memoryLimitMb }),
-          ...(allowedLanguages !== undefined && { allowedLanguages }),
-        });
-        res.json({
-          success: true,
-          dockerConfig: this.sandboxService.getConfig(),
-          localConfig: this.localSandboxService.getConfig(),
-        });
-      } catch (error: any) {
-        res.status(500).json({ error: error.message });
+        res.json({ success: true, dockerConfig: this.sandboxService.getConfig() });
+      } catch (error: any) { res.status(500).json({ error: error.message }); }
+    });
+
+    // ==========================================
+    // AGENTES (integrados nas APIs existentes)
+    // ==========================================
+
+    // Executa agente via POST na API de chat (usando header X-Carcara-Agent)
+    this.app.post('/v1/chat/completions', strictLimiter, async (req: Request, res: Response) => {
+      const agentId = req.headers['x-carcara-agent'] as string;
+      if (agentId && req.body.messages?.length) {
+        try {
+          const lastMsg = req.body.messages[req.body.messages.length - 1];
+          const result = await this.agentEngine.run({
+            id: `api_${Date.now()}`, agentId,
+            input: { description: this.extractText(lastMsg.content), language: 'python' },
+            config: req.body.config || {},
+          });
+          res.json({
+            id: `agent-${Date.now()}`, object: 'chat.completion',
+            created: Math.floor(Date.now() / 1000),
+            model: req.body.model || 'agent',
+            choices: [{ index: 0, message: { role: 'assistant', content: JSON.stringify(result.output, null, 2) }, finish_reason: 'stop' }],
+            usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+          });
+          return;
+        } catch (error: any) {
+          res.status(500).json({ error: error.message });
+          return;
+        }
       }
     });
 
     // ==========================================
-    // LLAMAUI CONFIG (localStorage)
+    // LLAMAUI CONFIG
     // ==========================================
 
     this.app.get('/api/config', async (_req: Request, res: Response) => {
-      try {
-        const config = await this.client.llamaUI.getConfig();
-        res.json({ config });
-      } catch (error: any) {
-        res.status(500).json({ error: error.message });
-      }
+      try { const config = await this.client.llamaUI.getConfig(); res.json({ config }); }
+      catch (error: any) { res.status(500).json({ error: error.message }); }
     });
 
     this.app.post('/api/config', async (req: Request, res: Response) => {
-      try {
-        await this.client.llamaUI.setConfig(req.body);
-        res.json({ success: true });
-      } catch (error: any) {
-        res.status(500).json({ error: error.message });
-      }
+      try { await this.client.llamaUI.setConfig(req.body); res.json({ success: true }); }
+      catch (error: any) { res.status(500).json({ error: error.message }); }
     });
 
     this.app.get('/api/config/system-message', async (_req: Request, res: Response) => {
-      try {
-        const msg = await this.client.llamaUI.getSystemMessage();
-        res.json({ systemMessage: msg });
-      } catch (error: any) {
-        res.status(500).json({ error: error.message });
-      }
+      try { const msg = await this.client.llamaUI.getSystemMessage(); res.json({ systemMessage: msg }); }
+      catch (error: any) { res.status(500).json({ error: error.message }); }
     });
 
     this.app.post('/api/config/system-message', async (req: Request, res: Response) => {
@@ -603,18 +537,12 @@ export class CarcaraRouter {
         if (message === undefined) return res.status(400).json({ error: 'message is required' });
         await this.client.llamaUI.setSystemMessage(message);
         res.json({ success: true, systemMessage: message });
-      } catch (error: any) {
-        res.status(500).json({ error: error.message });
-      }
+      } catch (error: any) { res.status(500).json({ error: error.message }); }
     });
 
     this.app.get('/api/config/mcp', async (_req: Request, res: Response) => {
-      try {
-        const servers = await this.client.llamaUI.getMcpServers();
-        res.json({ servers });
-      } catch (error: any) {
-        res.status(500).json({ error: error.message });
-      }
+      try { const servers = await this.client.llamaUI.getMcpServers(); res.json({ servers }); }
+      catch (error: any) { res.status(500).json({ error: error.message }); }
     });
 
     this.app.post('/api/config/mcp', async (req: Request, res: Response) => {
@@ -623,27 +551,17 @@ export class CarcaraRouter {
         if (!server.id || !server.url) return res.status(400).json({ error: 'id and url are required' });
         await this.client.llamaUI.addMcpServer(server);
         res.json({ success: true, server });
-      } catch (error: any) {
-        res.status(500).json({ error: error.message });
-      }
+      } catch (error: any) { res.status(500).json({ error: error.message }); }
     });
 
     this.app.delete('/api/config/mcp/:id', async (req: Request, res: Response) => {
-      try {
-        await this.client.llamaUI.removeMcpServer(req.params.id);
-        res.json({ success: true, removed: req.params.id });
-      } catch (error: any) {
-        res.status(500).json({ error: error.message });
-      }
+      try { await this.client.llamaUI.removeMcpServer(req.params.id); res.json({ success: true, removed: req.params.id }); }
+      catch (error: any) { res.status(500).json({ error: error.message }); }
     });
 
     this.app.get('/api/config/thinking', async (_req: Request, res: Response) => {
-      try {
-        const enabled = await this.client.llamaUI.getEnableThinking();
-        res.json({ enableThinking: enabled });
-      } catch (error: any) {
-        res.status(500).json({ error: error.message });
-      }
+      try { const enabled = await this.client.llamaUI.getEnableThinking(); res.json({ enableThinking: enabled }); }
+      catch (error: any) { res.status(500).json({ error: error.message }); }
     });
 
     this.app.post('/api/config/thinking', async (req: Request, res: Response) => {
@@ -652,119 +570,43 @@ export class CarcaraRouter {
         if (enabled === undefined) return res.status(400).json({ error: 'enabled is required' });
         await this.client.llamaUI.setEnableThinking(enabled);
         res.json({ success: true, enableThinking: enabled });
-      } catch (error: any) {
-        res.status(500).json({ error: error.message });
-      }
+      } catch (error: any) { res.status(500).json({ error: error.message }); }
     });
 
     this.app.get('/api/config/theme', async (_req: Request, res: Response) => {
-      try {
-        const theme = await this.client.llamaUI.getTheme();
-        res.json({ theme });
-      } catch (error: any) {
-        res.status(500).json({ error: error.message });
-      }
+      try { const theme = await this.client.llamaUI.getTheme(); res.json({ theme }); }
+      catch (error: any) { res.status(500).json({ error: error.message }); }
     });
 
     this.app.post('/api/config/theme', async (req: Request, res: Response) => {
-      try {
-        const { theme } = req.body;
-        if (!theme) return res.status(400).json({ error: 'theme is required' });
-        await this.client.llamaUI.setTheme(theme);
-        res.json({ success: true, theme });
-      } catch (error: any) {
-        res.status(500).json({ error: error.message });
-      }
-    });
-
-    this.app.get('/api/config/raw', async (_req: Request, res: Response) => {
-      try {
-        const data = await this.client.llamaUI.getAllLlamaUiData();
-        res.json(data);
-      } catch (error: any) {
-        res.status(500).json({ error: error.message });
-      }
-    });
-
-    this.app.get('/api/config/raw/:key', async (req: Request, res: Response) => {
-      try {
-        const value = await this.client.llamaUI.getRaw(req.params.key);
-        res.json({ key: req.params.key, value });
-      } catch (error: any) {
-        res.status(500).json({ error: error.message });
-      }
-    });
-
-    this.app.post('/api/config/raw/:key', async (req: Request, res: Response) => {
-      try {
-        const { value } = req.body;
-        if (value === undefined) return res.status(400).json({ error: 'value is required' });
-        await this.client.llamaUI.setRaw(req.params.key, value);
-        res.json({ success: true, key: req.params.key });
-      } catch (error: any) {
-        res.status(500).json({ error: error.message });
-      }
-    });
-
-    this.app.delete('/api/config/reset', async (_req: Request, res: Response) => {
-      try {
-        await this.client.llamaUI.resetConfig();
-        res.json({ success: true, message: 'LlamaUI config resetada' });
-      } catch (error: any) {
-        res.status(500).json({ error: error.message });
-      }
+      try { await this.client.llamaUI.setTheme(req.body.theme); res.json({ success: true }); }
+      catch (error: any) { res.status(500).json({ error: error.message }); }
     });
 
     // ==========================================
-    // INICIALIZAR
+    // START
     // ==========================================
-    console.log('Inicializando Carcara Client...');
-    try {
-      await this.client.init();
-      console.log('Cliente pronto!');
-    } catch (error: any) {
-      console.error('Erro na inicializacao:', error.message);
-    }
 
-    return new Promise((resolve) => {
+    await this.client.init();
+
+    return new Promise<void>((resolve) => {
       this.app.listen(this.port, () => {
-        console.log(`\n🦙 Carcara AI Gateway`);
-        console.log(`🌐 http://localhost:${this.port}`);
-        console.log('═══════════════════════════════════════');
-        console.log('📋 OpenAI Compatible:');
-        console.log(` GET /v1/models → Listar modelos`);
-        console.log(` POST /v1/chat/completions → Chat (stream/nao-stream)`);
-        console.log(` POST /v1/embeddings → Embeddings`);
-        console.log('');
-        console.log('📋 Ollama Compatible:');
-        console.log(` GET /api/health → Health check`);
-        console.log(` GET /api/tags → Listar modelos`);
-        console.log(` POST /api/show → Info do modelo`);
-        console.log(` POST /api/generate → Gerar texto`);
-        console.log(` POST /api/chat → Chat`);
-        console.log(` POST /api/embed → Embeddings`);
-        console.log('');
-        console.log('📋 MCP Tools:');
-        console.log(` GET /mcp/list → Listar ferramentas`);
-        console.log(` POST /mcp/call → Chamar ferramenta`);
-        console.log('');
-        console.log('🐳 Sandbox (Docker + Local fallback):');
-        console.log(` GET /api/sandbox/status → Verificar Docker/Local disponível`);
-        console.log(` POST /api/sandbox/exec → Executar código (Docker → Local)`);
-        console.log(` POST /api/sandbox/config → Configurar limites`);
-        console.log('');
-        console.log('📋 Search:');
-        console.log(` POST /api/search → Busca multi-provider`);
-        console.log(` POST /api/search/ddg → DuckDuckGo`);
-        console.log(` POST /api/search/wiki → Wikipedia`);
-        console.log('');
-        console.log('📋 Debug:');
-        console.log(` GET /ping → Ping`);
-        console.log(` GET /api/debug/conversations → Debug detalhado`);
-        console.log(` GET /api/conversations/:id/export → Exportar conversa`);
-        console.log('═══════════════════════════════════════');
-        console.log(`📁 Sessao: .carcara/session.json`);
-        console.log('═══════════════════════════════════════\n');
+        console.log('\\u2554\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2557');
+        console.log('\\u2551      🤖 Carcara Proxy v3.0 - Agentic Loop      \u2551');
+        console.log('\\u2551         Docker: ' + (this.dockerAvailable ? '✅' : '❌') + ' | Agents: ' + this.agentEngine.list().length + '         \u2551');
+        console.log('\\u2560\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2557');
+        console.log(`\\u2551  🌐 http://localhost:${this.port}                           \u2551`);
+        console.log('\\u2551  📋 OpenAI: /v1/models, /v1/chat/completions, /v1/embeddings  \u2551');
+        console.log('\\u2551  📋 Ollama: /api/health, /api/tags, /api/chat, /api/generate  \u2551');
+        console.log('\\u2551  🔧 MCP: /mcp/list, /mcp/call                                \u2551');
+        console.log('\\u2551  🐳 Sandbox: /api/sandbox/exec (Docker)                        \u2551');
+        console.log('\\u2551  🔍 Search: /api/search, /api/search/ddg, /api/search/wiki     \u2551');
+        console.log('\\u2551  🤖 Agentes: detectados automaticamente no chat               \u2551');
+        console.log('\\u2551  🧠 Memoria: .carcara/memory.jsonl                            \u2551');
+        console.log('\\u2551  📊 Metricas: .carcara/metrics.jsonl                          \u2551');
+        console.log('\\u255a\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u255d');
+        console.log(`\\u2551  📁 Sessao: .carcara/session.json                              \u2551`);
+        console.log('\\u255a\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u255d\\n');
         resolve();
       });
     });
@@ -772,5 +614,9 @@ export class CarcaraRouter {
 
   async stop(): Promise<void> {
     await this.client.close();
+    this.metricsService.stop();
   }
 }
+
+import pino from 'pino';
+const logger = pino({ level: process.env.LOG_LEVEL || 'info' });

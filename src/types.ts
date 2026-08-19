@@ -5,7 +5,7 @@ export interface CarcaraConfig {
 }
 
 // ============================================================================
-// INDEXEDDB - Estrutura real do LlamaUI (baseado no dump)
+// INDEXEDDB - Estrutura real do LlamaUI
 // ============================================================================
 
 export interface LlamaMessage {
@@ -17,12 +17,10 @@ export interface LlamaMessage {
   parent: string | number | null;
   children: (string | number)[];
   timestamp: number;
-  // Campos do assistant
-  toolCalls?: string;           // string no dump real (não array!)
-  model?: string;               // ex: "DeepSeek-v4-Flash-0731"
-  completionId?: string;        // ex: "chatcmpl-..."
+  toolCalls?: string;
+  model?: string;
+  completionId?: string;
   timings?: MessageTimings;
-  // Campos do user
   extra?: any[];
 }
 
@@ -44,7 +42,6 @@ export interface ConversationNode {
   lastModified: number;
   currNode: string | number;
   thinkingEnabled?: boolean;
-  // NOTA: mcpServerOverrides NAO está no IndexedDB, está no localStorage
 }
 
 // ============================================================================
@@ -256,7 +253,7 @@ export interface LlamaUIConfig {
   customCss?: string;
   mcpRequestTimeoutSeconds?: number;
   showSystemMessage?: boolean;
-  mcpServers?: string; // JSON string
+  mcpServers?: string;
 }
 
 export interface MCPServerConfig {
@@ -273,4 +270,100 @@ export interface LlamaUIMigrationState {
   completed: string[];
   failed: string[];
   lastRun: string;
+}
+
+// ============================================================================
+// AGENT / LOOP ENGINEERING
+// ============================================================================
+
+export type LoopPhase = 'plan' | 'execute' | 'evaluate' | 'adapt' | 'complete' | 'failed';
+
+export interface LoopConfig {
+  maxIterations: number;
+  convergenceThreshold: number;
+  timeoutMs: number;
+  backoffMultiplier: number;
+  maxBackoffMs: number;
+  stopOnRegression: boolean;
+  saveCheckpoints: boolean;
+}
+
+export interface LoopIteration<T = any> {
+  iteration: number;
+  phase: LoopPhase;
+  input: T;
+  output: T;
+  score: number;
+  metrics: Record<string, number>;
+  timestamp: number;
+  durationMs: number;
+  error?: string;
+}
+
+export interface LoopResult<T = any> {
+  success: boolean;
+  iterations: LoopIteration<T>[];
+  bestOutput: T;
+  bestScore: number;
+  bestIteration: number;
+  totalDurationMs: number;
+  stoppedReason: 'converged' | 'maxIterations' | 'timeout' | 'regression' | 'error';
+}
+
+export interface AgentDefinition {
+  id: string;
+  name: string;
+  description: string;
+  version: string;
+  capabilities: string[];
+}
+
+export interface AgentTask {
+  id: string;
+  agentId: string;
+  input: any;
+  expectedOutput?: any;
+  config?: Record<string, any>;
+  priority?: number;
+  timeoutMs?: number;
+}
+
+export interface AgentTaskResult {
+  taskId: string;
+  agentId: string;
+  success: boolean;
+  output: any;
+  loopResult?: LoopResult;
+  durationMs: number;
+  timestamp: number;
+}
+
+export interface MemoryEntry {
+  id: string;
+  type: 'conversation' | 'code' | 'prompt' | 'metric' | 'feedback';
+  content: string;
+  metadata: Record<string, any>;
+  timestamp: number;
+  tags: string[];
+}
+
+export interface CodeTaskInput {
+  description: string;
+  language: 'python' | 'javascript' | 'typescript' | 'bash';
+  testCases?: string[];
+  expectedOutput?: string;
+  constraints?: string;
+  maxTokens?: number;
+}
+
+export interface CodeIteration {
+  code: string;
+  explanation: string;
+  testResults: {
+    passed: boolean;
+    stdout: string;
+    stderr: string;
+    exitCode: number;
+  }[];
+  score: number;
 }

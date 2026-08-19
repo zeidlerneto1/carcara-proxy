@@ -6,16 +6,15 @@ import pino from 'pino';
 import { Readable } from 'stream';
 import { LlamaUIConfigService } from './llama-ui-config.js';
 import { ThinkingService, ThinkingConfig } from './thinking-service.js';
+import { AgentEngine } from './agent-engine.js';
+import { MemoryService } from './memory-service.js';
+import { MetricsService } from './metrics-service.js';
 import {
   CarcaraConfig, LlamaMessage, ConversationNode, ChatCompletionResponse,
   MCPListResponse, LoginPayload, ModelInfo, LoginScript, LoginStep, StoredSession
 } from './types.js';
 
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
-
-// ============================================================================
-// CONSTANTES
-// ============================================================================
 
 const CARCARA_BASE_URL = process.env.CARCARA_URL || 'https://carcara.sinapad.lncc.br';
 const LOGIN_PAGE = '/apps/login/';
@@ -50,7 +49,7 @@ const MAX_RETRIES = 3;
 const MODELS_CACHE_TTL = 60 * 60 * 1000;
 
 // ============================================================================
-// LOGGER / RECORDER (async, non-blocking)
+// LOGIN RECORDER
 // ============================================================================
 
 class LoginRecorder {
@@ -92,14 +91,9 @@ class LoginRecorder {
 
   async saveLoginScript(): Promise<void> {
     const script: LoginScript = {
-      version: '2.0',
-      url: CARCARA_BASE_URL,
-      createdAt: new Date().toISOString(),
-      steps: this.steps,
-      successIndicators: {
-        cookieNames: ['PHPSESSID', 'carcara_auth'],
-        responseStatus: 200,
-      },
+      version: '2.0', url: CARCARA_BASE_URL,
+      createdAt: new Date().toISOString(), steps: this.steps,
+      successIndicators: { cookieNames: ['PHPSESSID', 'carcara_auth'], responseStatus: 200 },
     };
     await fs.writeFile(this.scriptPath, JSON.stringify(script, null, 2), 'utf-8');
     logger.info({ steps: this.steps.length }, 'Script salvo');
@@ -110,18 +104,10 @@ class LoginRecorder {
       const cookies = await page.context().cookies();
       const phpsessid = cookies.find(c => c.name === 'PHPSESSID')?.value;
       const carcaraAuth = cookies.find(c => c.name === 'carcara_auth')?.value;
-
       const session: StoredSession = {
-        token: token || '',
-        cookies: cookies as any,
-        phpsessid,
-        timestamp: Date.now(),
+        token: token || '', cookies: cookies as any, phpsessid, timestamp: Date.now(),
       };
-
-      if (carcaraAuth) {
-        (session as any).carcaraAuth = carcaraAuth;
-      }
-
+      if (carcaraAuth) (session as any).carcaraAuth = carcaraAuth;
       await fs.writeFile(this.sessionPath, JSON.stringify(session, null, 2), 'utf-8');
       logger.info({ phpsessid: phpsessid?.slice(0, 10), carcaraAuth: carcaraAuth?.slice(0, 10) }, 'Sessao salva');
     } catch (error: any) {
@@ -133,17 +119,14 @@ class LoginRecorder {
     try {
       const data = await fs.readFile(this.sessionPath, 'utf-8');
       const session: StoredSession = JSON.parse(data);
-
       if (Date.now() - session.timestamp > TIMEOUT_SESSION_EXPIRY) {
         logger.warn('Sessao expirada (>24h)');
         return null;
       }
-
       if (session.cookies?.length) {
         await page.context().addCookies(session.cookies as any);
         logger.info('Cookies restaurados');
       }
-
       const serviceUrl = `${CARCARA_BASE_URL}${SERVICE_PATH}/`;
       const url = session.token ? `${serviceUrl}?token=${session.token}` : serviceUrl;
       await page.goto(url, { waitUntil: 'networkidle', timeout: TIMEOUT_NAVIGATION });
@@ -191,6 +174,9 @@ export class CarcaraClient {
   private recorder: LoginRecorder;
   private llamaUIConfig: LlamaUIConfigService;
   private thinkingService: ThinkingService;
+  private agentEngine: AgentEngine | null = null;
+  private memoryService: MemoryService | null = null;
+  private metricsService: MetricsService | null = null;
 
   private authToken: string | null = null;
   private phpsessid: string | null = null;
@@ -205,20 +191,30 @@ export class CarcaraClient {
   constructor(config: CarcaraConfig = {}) {
     const baseUrl = config.baseUrl || CARCARA_BASE_URL;
     const domain = config.domain || DEFAULT_DOMAIN;
-
-    this.config = {
-      baseUrl,
-      apiBaseUrl: config.apiBaseUrl || `${baseUrl}${SERVICE_PATH}`,
-      domain,
-    };
-
+    this.config = { baseUrl, apiBaseUrl: config.apiBaseUrl || `${baseUrl}${SERVICE_PATH}`, domain };
     this.axiosInstance = this.createAxiosInstance();
     this.recorder = new LoginRecorder();
     this.llamaUIConfig = new LlamaUIConfigService();
     this.thinkingService = new ThinkingService();
   }
 
-  // UMA unica instancia Axios com interceptor de cookies
+  setAgentEngine(engine: AgentEngine): void {
+    this.agentEngine = engine;
+    this.thinkingService.setServices(engine, this.memoryService!, this.metricsService!, this);
+  }
+
+  setMemoryService(memory: MemoryService): void {
+    this.memoryService = memory;
+    if (this.agentEngine) this.thinkingService.setServices(this.agentEngine, memory, this.metricsService!, this);
+  }
+
+  setMetricsService(metrics: MetricsService): void {
+    this.metricsService = metrics;
+    if (this.agentEngine) this.thinkingService.setServices(this.agentEngine, this.memoryService!, metrics, this);
+  }
+
+  get thinking(): ThinkingService { return this.thinkingService; }
+
   private createAxiosInstance(): AxiosInstance {
     const instance = axios.create({
       baseURL: this.config.baseUrl,
@@ -235,28 +231,20 @@ export class CarcaraClient {
       validateStatus: () => true,
     });
 
-    // Interceptor injeta cookies automaticamente
     instance.interceptors.request.use(async (cfg: InternalAxiosRequestConfig) => {
       if (!cfg.headers) cfg.headers = new axios.AxiosHeaders();
       const cookies = await this.getCookieString();
-      if (cookies) {
-        cfg.headers.set('Cookie', cookies);
-      }
+      if (cookies) cfg.headers.set('Cookie', cookies);
       return cfg;
     });
 
     return instance;
   }
 
-  // Cache de cookie string (invalidado a cada 5s ou quando muda)
   private async getCookieString(): Promise<string> {
     if (!this.context || this.page?.isClosed()) return this.cookieStringCache;
-
     const now = Date.now();
-    if (now - this.cookieStringCacheTime < 5000 && this.cookieStringCache) {
-      return this.cookieStringCache;
-    }
-
+    if (now - this.cookieStringCacheTime < 5000 && this.cookieStringCache) return this.cookieStringCache;
     const cookies = await this.context.cookies([this.config.baseUrl]);
     this.cookieStringCache = cookies.map(c => `${c.name}=${c.value}`).join('; ');
     this.cookieStringCacheTime = now;
@@ -268,16 +256,11 @@ export class CarcaraClient {
     this.cookieStringCacheTime = 0;
   }
 
-  // ==========================================================================
-  // INICIALIZACAO
-  // ==========================================================================
-
   async init(): Promise<void> {
     if (this.isInitialized) {
       logger.info('Cliente ja inicializado');
       return;
     }
-
     logger.info({ url: this.config.baseUrl, domain: this.config.domain }, 'Iniciando Carcara Client');
 
     try {
@@ -285,7 +268,6 @@ export class CarcaraClient {
       await this.handleAuthentication();
       await this.navigateToService();
       await this.fetchModels();
-
       this.isInitialized = true;
       logger.info('Carcara Client inicializado com sucesso');
     } catch (error: any) {
@@ -295,144 +277,69 @@ export class CarcaraClient {
     }
   }
 
-  async close(): Promise<void> {
-    await this.cleanup();
-  }
-
-  // ==========================================================================
-  // NAVEGADOR
-  // ==========================================================================
-
-  public tryParseJSON(text: string): any {
-    try { return JSON.parse(text); } catch { return text; }
-  }
-
   private async launchBrowser(): Promise<void> {
-    logger.info('Iniciando navegador em modo silencioso');
-
+    logger.info('Lancando navegador');
     this.browser = await chromium.launch({
       headless: true,
       args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-gpu',
-        '--disable-background-timer-throttling',
-        '--disable-backgrounding-occluded-windows',
-        '--disable-renderer-backgrounding',
+        '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage',
+        '--disable-accelerated-2d-canvas', '--disable-gpu', '--no-zygote',
+        '--disable-background-networking', '--disable-background-timer-throttling',
+        '--disable-backgrounding-occluded-windows', '--disable-breakpad',
+        '--disable-component-extensions-with-background-pages', '--disable-extensions',
+        '--disable-features=TranslateUI', '--disable-ipc-flooding-protection',
+        '--disable-renderer-backgrounding', '--force-color-profile=srgb',
+        '--metrics-recording-only', '--mute-audio',
       ],
     });
 
     this.context = await this.browser.newContext({
       viewport: { width: 1280, height: 720 },
-      userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
+      userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      locale: 'pt-BR',
+      timezoneId: 'America/Sao_Paulo',
     });
 
     this.page = await this.context.newPage();
-    this.page.setDefaultTimeout(TIMEOUT_NAVIGATION);
-
-    // Intercepta trafego do chat (async, nao bloqueante)
-    this.page.on('response', async (response) => {
-      const url = response.url();
-      if (url.includes('/v1/chat/completions') && response.request().method() === 'POST') {
-        this.saveTraffic(response).catch(() => {});
-      }
-    });
-
-    logger.info('Navegador iniciado');
+    this.page.setDefaultTimeout(TIMEOUT_ELEMENT);
+    this.llamaUIConfig.setPage(this.page);
+    logger.info('Navegador pronto');
   }
-
-  private async saveTraffic(response: any): Promise<void> {
-    try {
-      const requestBody = response.request().postData();
-      const responseBody = await response.text();
-      const chatDir = path.join(process.cwd(), '.carcara', 'chats');
-      await fs.mkdir(chatDir, { recursive: true });
-
-      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-      const filePath = path.join(chatDir, `traffic_${timestamp}.json`);
-
-      const data = {
-        timestamp: new Date().toISOString(),
-        url,
-        status: response.status(),
-        request: requestBody ? this.tryParseJSON(requestBody) : null,
-        response: this.tryParseJSON(responseBody),
-      };
-
-      await fs.writeFile(filePath, JSON.stringify(data, null, 2), 'utf-8');
-      logger.info({ file: `traffic_${timestamp}.json` }, 'Trafego salvo');
-    } catch {
-      // Silencioso
-    }
-  }
-
-  private async navigateToService(): Promise<void> {
-    logger.info('Navegando para /service/');
-
-    const serviceUrl = `${this.config.baseUrl}${SERVICE_PATH}/`;
-    const url = this.authToken ? `${serviceUrl}?token=${this.authToken}` : serviceUrl;
-
-    await this.page!.goto(url, { waitUntil: 'networkidle', timeout: TIMEOUT_NAVIGATION });
-    await this.page!.waitForTimeout(3000);
-
-    const cookies = await this.context!.cookies([this.config.baseUrl]);
-    const carcaraAuthCookie = cookies.find(c => c.name === 'carcara_auth');
-    if (carcaraAuthCookie) {
-      this.carcaraAuth = carcaraAuthCookie.value;
-      logger.info({ auth: this.carcaraAuth.slice(0, 15) }, 'carcara_auth obtido');
-    }
-
-    const phpsessidCookie = cookies.find(c => c.name === 'PHPSESSID');
-    if (phpsessidCookie) {
-      this.phpsessid = phpsessidCookie.value;
-    }
-
-    this.invalidateCookieCache();
-    await this.recorder.saveSession(this.page!, this.authToken || undefined);
-  }
-
-  // ==========================================================================
-  // AUTENTICACAO
-  // ==========================================================================
 
   private async handleAuthentication(): Promise<void> {
-    logger.info('Verificando sessao salva');
-    const restoredSession = await this.recorder.restoreSession(this.page!);
-
-    if (restoredSession) {
-      this.phpsessid = restoredSession.phpsessid || null;
-      this.authToken = restoredSession.token || null;
-      this.carcaraAuth = (restoredSession as any).carcaraAuth || null;
-      this.invalidateCookieCache();
-
-      const currentUrl = this.page!.url();
-      if (!currentUrl.includes('/login')) {
-        logger.info('Sessao restaurada com sucesso');
-        return;
-      }
-      logger.warn('Sessao expirada, refazendo login');
+    const restored = await this.recorder.restoreSession(this.page!);
+    if (restored) {
+      logger.info('Sessao restaurada do disco');
+      return;
     }
 
     const envConfig = this.getEnvConfig();
     if (envConfig) {
-      logger.info('Tentando login via API');
-      const apiLoginSuccess = await this.apiLogin(envConfig.username, envConfig.password);
-      if (apiLoginSuccess) {
-        logger.info('Login via API realizado');
+      const success = await this.apiLogin(envConfig);
+      if (success) {
+        logger.info('Login automatico via API');
         return;
       }
-      logger.warn('Login via API falhou, tentando navegador');
     }
 
     await this.browserLogin(envConfig);
   }
 
-  private async apiLogin(username: string, password: string): Promise<boolean> {
-    try {
-      logger.info('Enviando requisicao de login via API');
+  private async navigateToService(): Promise<void> {
+    const serviceUrl = `${this.config.baseUrl}${SERVICE_PATH}/`;
+    if (!this.page?.url().includes(SERVICE_PATH)) {
+      await this.page!.goto(serviceUrl, { waitUntil: 'networkidle', timeout: TIMEOUT_NAVIGATION });
+      await this.page!.waitForTimeout(2000);
+    }
+    logger.info('Servico carregado');
+  }
 
-      await this.page!.goto(this.config.baseUrl, { waitUntil: 'networkidle', timeout: TIMEOUT_NAVIGATION });
+  private async apiLogin(envConfig: { username: string; password: string }): Promise<boolean> {
+    try {
+      this.recorder.startRecording();
+      this.recorder.recordStep({ type: 'navigate', url: `${this.config.baseUrl}${LOGIN_PAGE}`, description: 'Pagina de login' });
+
+      await this.page!.goto(`${this.config.baseUrl}${LOGIN_PAGE}`, { waitUntil: 'networkidle' });
       await this.page!.waitForTimeout(2000);
 
       const cookies = await this.context!.cookies([this.config.baseUrl]);
@@ -442,18 +349,9 @@ export class CarcaraClient {
         logger.info({ sessid: phpsessid.slice(0, 10) }, 'PHPSESSID obtido');
       }
 
-      const payload: LoginPayload = {
-        action: 'login',
-        user: username,
-        password: password,
-        domain: this.config.domain,
-      };
-
+      const payload: LoginPayload = { action: 'login', user: envConfig.username, password: envConfig.password, domain: this.config.domain };
       const response = await this.axiosInstance.post(LOGIN_API, payload, {
-        headers: {
-          'Cookie': `PHPSESSID=${phpsessid}`,
-          'Content-Type': 'application/json;charset=UTF-8',
-        },
+        headers: { 'Cookie': `PHPSESSID=${phpsessid}`, 'Content-Type': 'application/json;charset=UTF-8' },
         timeout: TIMEOUT_API,
       });
 
@@ -493,14 +391,8 @@ export class CarcaraClient {
       const loginUrl = `${this.config.baseUrl}${LOGIN_PAGE}`;
       await this.page!.goto(loginUrl, { waitUntil: 'networkidle' });
 
-      await this.fillField(
-        ['input[name="user"]', 'input[type="text"]', 'input[type="email"]'],
-        envConfig.username, 'usuario'
-      );
-      await this.fillField(
-        ['input[type="password"]', 'input[name="password"]'],
-        envConfig.password, 'senha'
-      );
+      await this.fillField(['input[name="user"]', 'input[type="text"]', 'input[type="email"]'], envConfig.username, 'usuario');
+      await this.fillField(['input[type="password"]', 'input[name="password"]'], envConfig.password, 'senha');
       await this.clickSubmit();
       await this.page!.waitForTimeout(3000);
 
@@ -522,20 +414,12 @@ export class CarcaraClient {
     await this.saveCredentialsFromPage();
   }
 
-  // ==========================================================================
-  // MODELOS (com cache em memoria)
-  // ==========================================================================
-
   private async fetchModels(): Promise<void> {
     logger.info('Buscando modelos disponiveis');
-
-    // Cache em memoria (1h)
     if (Date.now() - this.modelsCacheTime < MODELS_CACHE_TTL && this.availableModels.length) {
       logger.info({ count: this.availableModels.length }, 'Usando cache em memoria');
       return;
     }
-
-    // Cache em disco
     const cachedModels = await this.recorder.loadModelsCache();
     if (cachedModels?.length) {
       this.availableModels = cachedModels;
@@ -543,13 +427,8 @@ export class CarcaraClient {
       this.displayModels();
       return;
     }
-
     try {
-      const response = await this.axiosInstance.get(MODELS_API, {
-        baseURL: this.config.apiBaseUrl,
-        timeout: TIMEOUT_API,
-      });
-
+      const response = await this.axiosInstance.get(MODELS_API, { baseURL: this.config.apiBaseUrl, timeout: TIMEOUT_API });
       if (response.status === 200 && response.data?.data) {
         this.availableModels = response.data.data;
         this.modelsCacheTime = Date.now();
@@ -570,17 +449,8 @@ export class CarcaraClient {
     });
   }
 
-  async getAvailableModels(): Promise<ModelInfo[]> {
-    return this.availableModels;
-  }
-
-  getDefaultModel(): string {
-    return this.availableModels[0]?.id || DEFAULT_MODEL;
-  }
-
-  // ==========================================================================
-  // AUXILIARES
-  // ==========================================================================
+  async getAvailableModels(): Promise<ModelInfo[]> { return this.availableModels; }
+  getDefaultModel(): string { return this.availableModels[0]?.id || DEFAULT_MODEL; }
 
   private async fillField(selectors: string[], value: string, fieldName: string): Promise<boolean> {
     for (const selector of selectors) {
@@ -595,12 +465,7 @@ export class CarcaraClient {
   }
 
   private async clickSubmit(): Promise<void> {
-    const selectors = [
-      'button[type="submit"]',
-      'input[type="submit"]',
-      'button:has-text("Login")',
-      'button:has-text("Entrar")',
-    ];
+    const selectors = ['button[type="submit"]', 'input[type="submit"]', 'button:has-text("Login")', 'button:has-text("Entrar")'];
     for (const selector of selectors) {
       const button = await this.page!.$(selector);
       if (button && await button.isVisible()) {
@@ -620,18 +485,9 @@ export class CarcaraClient {
 
   private async saveCredentialsFromPage(): Promise<void> {
     try {
-      const username = await this.page!.$eval(
-        'input:not([type="password"])',
-        (el: HTMLInputElement) => el.value
-      ).catch(() => null);
-      const password = await this.page!.$eval(
-        'input[type="password"]',
-        (el: HTMLInputElement) => el.value
-      ).catch(() => null);
-
-      if (username && password) {
-        await this.updateEnvFile(username, password);
-      }
+      const username = await this.page!.$eval('input:not([type="password"])', (el: HTMLInputElement) => el.value).catch(() => null);
+      const password = await this.page!.$eval('input[type="password"]', (el: HTMLInputElement) => el.value).catch(() => null);
+      if (username && password) await this.updateEnvFile(username, password);
     } catch {}
   }
 
@@ -639,26 +495,14 @@ export class CarcaraClient {
     const envPath = path.join(process.cwd(), '.env');
     let content = '';
     try { content = await fs.readFile(envPath, 'utf-8'); } catch {}
-
-    const updates: Record<string, string> = {
-      [ENV_USER]: username,
-      [ENV_PASS]: password,
-    };
-
+    const updates: Record<string, string> = { [ENV_USER]: username, [ENV_PASS]: password };
     for (const [key, value] of Object.entries(updates)) {
       const regex = new RegExp(`^${key}=.*`, 'm');
-      if (regex.test(content)) {
-        content = content.replace(regex, `${key}=${value}`);
-      } else {
-        content += content ? `\\n${key}=${value}` : `${key}=${value}`;
-      }
+      if (regex.test(content)) content = content.replace(regex, `${key}=${value}`);
+      else content += content ? `\n${key}=${value}` : `${key}=${value}`;
     }
-
-    if (!content.includes('CARCARA_URL=')) {
-      content += `\\nCARCARA_URL=${this.config.baseUrl}`;
-    }
-
-    await fs.writeFile(envPath, content.trim() + '\\n', 'utf-8');
+    if (!content.includes('CARCARA_URL=')) content += `\nCARCARA_URL=${this.config.baseUrl}`;
+    await fs.writeFile(envPath, content.trim() + '\n', 'utf-8');
     logger.info('Credenciais salvas no .env');
   }
 
@@ -666,14 +510,8 @@ export class CarcaraClient {
     return this.page?.url().includes('/login') ?? true;
   }
 
-  // ==========================================================================
-  // INDEXEDDB (mantido - necessario para LlamaUI)
-  // ==========================================================================
-
   private async executeInBrowser(fn: string, arg?: any): Promise<any> {
-    if (!this.page || this.page.isClosed()) {
-      throw new Error('Pagina nao disponivel');
-    }
+    if (!this.page || this.page.isClosed()) throw new Error('Pagina nao disponivel');
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       try {
         return await this.page.evaluate(fn, arg);
@@ -727,16 +565,11 @@ export class CarcaraClient {
         return new Promise((resolve, reject) => {
           const request = indexedDB.open('${DB_NAME}');
           request.onerror = () => reject(request.error);
-          request.onupgradeneeded = () => {
-            const db = request.result;
-            if (!db.objectStoreNames.contains('${DB_STORE_CONVERSATIONS}')) {
-              db.createObjectStore('${DB_STORE_CONVERSATIONS}', { keyPath: 'id' });
-            }
-          };
           request.onsuccess = () => {
             const db = request.result;
             const tx = db.transaction('${DB_STORE_CONVERSATIONS}', 'readwrite');
-            tx.objectStore('${DB_STORE_CONVERSATIONS}').put(conversation);
+            const store = tx.objectStore('${DB_STORE_CONVERSATIONS}');
+            store.put(conversation);
             tx.oncomplete = () => resolve();
             tx.onerror = () => reject(tx.error);
           };
@@ -747,54 +580,50 @@ export class CarcaraClient {
 
   async getConversationMessages(convId: string): Promise<LlamaMessage[]> {
     this.ensureInitialized();
-    return this.executeInBrowser(`
-      async (convId) => {
-        return new Promise((resolve, reject) => {
-          const request = indexedDB.open('${DB_NAME}');
-          request.onerror = () => reject(request.error);
-          request.onupgradeneeded = () => {
-            const db = request.result;
-            if (!db.objectStoreNames.contains('${DB_STORE_MESSAGES}')) {
-              const store = db.createObjectStore('${DB_STORE_MESSAGES}', { keyPath: 'id' });
-              store.createIndex('convId', 'convId', { unique: false });
-            }
-          };
-          request.onsuccess = () => {
-            const db = request.result;
-            if (!db.objectStoreNames.contains('${DB_STORE_MESSAGES}')) { resolve([]); return; }
-            const tx = db.transaction('${DB_STORE_MESSAGES}', 'readonly');
-            const index = tx.objectStore('${DB_STORE_MESSAGES}').index('convId');
-            const req = index.getAll(convId);
-            req.onsuccess = () => {
-              const messages = req.result || [];
-              messages.sort((a, b) => a.timestamp - b.timestamp);
-              resolve(messages);
+    try {
+      const result = await this.executeInBrowser(`
+        async (convId) => {
+          return new Promise((resolve, reject) => {
+            const request = indexedDB.open('${DB_NAME}');
+            request.onerror = () => reject(request.error);
+            request.onsuccess = () => {
+              const db = request.result;
+              const tx = db.transaction('${DB_STORE_MESSAGES}', 'readonly');
+              const store = tx.objectStore('${DB_STORE_MESSAGES}');
+              const index = store.index('convId');
+              const req = index.getAll(convId);
+              req.onsuccess = () => resolve(req.result || []);
+              req.onerror = () => reject(req.error);
             };
-            req.onerror = () => reject(req.error);
-          };
-        });
-      }
-    `, convId);
+          });
+        }
+      `, convId);
+      return Array.isArray(result) ? result : [];
+    } catch (error: any) {
+      logger.error({ error: error.message }, 'Erro ao buscar mensagens');
+      return [];
+    }
   }
 
   async saveMessage(message: LlamaMessage): Promise<void> {
     this.ensureInitialized();
     await this.executeInBrowser(`
-      async (msg) => {
+      async (message) => {
         return new Promise((resolve, reject) => {
           const request = indexedDB.open('${DB_NAME}');
           request.onerror = () => reject(request.error);
           request.onupgradeneeded = () => {
             const db = request.result;
             if (!db.objectStoreNames.contains('${DB_STORE_MESSAGES}')) {
-              const store = db.createObjectStore('${DB_STORE_MESSAGES}', { keyPath: 'id' });
+              const store = db.createObjectStore('${DB_STORE_MESSAGES}', { keyPath: 'id', autoIncrement: true });
               store.createIndex('convId', 'convId', { unique: false });
             }
           };
           request.onsuccess = () => {
             const db = request.result;
             const tx = db.transaction('${DB_STORE_MESSAGES}', 'readwrite');
-            tx.objectStore('${DB_STORE_MESSAGES}').put(msg);
+            const store = tx.objectStore('${DB_STORE_MESSAGES}');
+            store.put(message);
             tx.oncomplete = () => resolve();
             tx.onerror = () => reject(tx.error);
           };
@@ -803,68 +632,17 @@ export class CarcaraClient {
     `, message);
   }
 
-  async saveConversationToFile(convId: string): Promise<string> {
-    this.ensureInitialized();
-    const conversations = await this.getConversations();
-    const conv = conversations.find(c => c.id === convId);
-    if (!conv) throw new Error('Conversa nao encontrada');
-
-    const messages = await this.getConversationMessages(convId);
-    const chatDir = path.join(process.cwd(), '.carcara', 'chats');
-    await fs.mkdir(chatDir, { recursive: true });
-
-    const safeName = conv.name.replace(/[^a-zA-Z0-9]/g, '_').substring(0, 50);
-    const fileName = `${safeName}_${convId.substring(0, 8)}.json`;
-    const filePath = path.join(chatDir, fileName);
-
-    const data = {
-      conversa: {
-        id: conv.id,
-        nome: conv.name,
-        data: new Date(conv.lastModified).toISOString(),
-        servidoresMCP: conv.mcpServerOverrides?.length || 0,
-      },
-      mensagens: messages.map(m => ({
-        papel: m.role,
-        tipo: m.type,
-        conteudo: m.content,
-        data: new Date(m.timestamp).toISOString(),
-      })),
-    };
-
-    await fs.writeFile(filePath, JSON.stringify(data, null, 2), 'utf-8');
-    logger.info({ file: filePath }, 'Conversa salva');
-    return filePath;
-  }
-
-  // ==========================================================================
-  // CHAT E MCP
-  // ==========================================================================
-
-  async createNewConversation(
-    title: string = DEFAULT_TITLE,
-    model?: string
-  ): Promise<string> {
+  async createNewConversation(title?: string): Promise<string> {
     this.ensureInitialized();
     const id = crypto.randomUUID ? crypto.randomUUID() : `conv_${Date.now()}`;
     const conversation: ConversationNode = {
-      id,
-      name: title,
-      currNode: id,
-      lastModified: Date.now(),
-      thinkingEnabled: false,
+      id, name: title || DEFAULT_TITLE,
+      lastModified: Date.now(), currNode: null, thinkingEnabled: true,
     };
-
     const systemMsg: LlamaMessage = {
       id: crypto.randomUUID ? crypto.randomUUID() : `msg_${Date.now()}`,
-      convId: id,
-      role: 'system',
-      type: 'root',
-      content: '',
-      children: [],
-      timestamp: Date.now(),
+      convId: id, role: 'system', type: 'root', content: '', children: [], timestamp: Date.now(),
     };
-
     await this.saveConversation(conversation);
     await this.saveMessage(systemMsg);
     this.currentConversationId = id;
@@ -872,25 +650,13 @@ export class CarcaraClient {
     return id;
   }
 
-
-  // ==========================================================================
-  // STREAMING SSE REAL (proxy direto do LNCC)
-  // ==========================================================================
-
-  async chatCompletionStream(
-    prompt: string,
-    model?: string,
-    tools?: any[]
-  ): Promise<Readable> {
+  async chatCompletionStream(prompt: string, model?: string, tools?: any[]): Promise<Readable> {
     this.ensureInitialized();
-    if (!this.currentConversationId) {
-      await this.createNewConversation();
-    }
+    if (!this.currentConversationId) await this.createNewConversation();
 
     const modelToUse = model || this.getDefaultModel();
     const convId = this.currentConversationId!;
 
-    // Salva mensagem do usuário no IndexedDB
     const conversations = await this.getConversations();
     const conv = conversations.find(c => c.id === convId);
     const parentId = conv?.currNode || null;
@@ -903,34 +669,23 @@ export class CarcaraClient {
     await this.saveMessage(userMsg);
     if (parentId) await this.addChildToMessage(parentId, userMsgId);
 
-    // Aplica sandbox de thinking
     const enrichedPrompt = await this.thinkingService.executeSandbox(prompt);
 
     const payload: any = {
-      model: modelToUse,
-      messages: [{ role: 'user', content: enrichedPrompt }],
-      stream: true,
-      temperature: DEFAULT_TEMPERATURE,
-      max_tokens: DEFAULT_MAX_TOKENS,
-      return_progress: true,
-      backend_sampling: false,
-      timings_per_token: true,
+      model: modelToUse, messages: [{ role: 'user', content: enrichedPrompt }],
+      stream: true, temperature: DEFAULT_TEMPERATURE, max_tokens: DEFAULT_MAX_TOKENS,
+      return_progress: true, backend_sampling: false, timings_per_token: true,
     };
 
     this.thinkingService.applyToPayload(payload);
-
-    if (tools?.length) payload.tools = tools;
     if (tools?.length) payload.tools = tools;
 
     logger.info({ model: modelToUse }, 'Streaming para modelo');
 
     const response = await this.axiosInstance.post(CHAT_API, payload, {
-      baseURL: this.config.apiBaseUrl,
-      timeout: TIMEOUT_CHAT,
-      responseType: 'stream',
+      baseURL: this.config.apiBaseUrl, timeout: TIMEOUT_CHAT, responseType: 'stream',
     });
 
-    // Bufferiza a resposta completa para salvar no IndexedDB depois
     let fullContent = '';
     let assistantMsgId = '';
     let completionId = '';
@@ -945,10 +700,7 @@ export class CarcaraClient {
       for (const line of lines) {
         if (!line.startsWith('data: ')) continue;
         const data = line.slice(6);
-        if (data === '[DONE]') {
-          passThrough.push(chunk);
-          continue;
-        }
+        if (data === '[DONE]') { passThrough.push(chunk); continue; }
         try {
           const parsed = JSON.parse(data);
           if (parsed.id && !completionId) completionId = parsed.id;
@@ -964,27 +716,22 @@ export class CarcaraClient {
 
     sourceStream.on('end', async () => {
       passThrough.push(null);
-
-      // Salva assistant no IndexedDB
       assistantMsgId = crypto.randomUUID ? crypto.randomUUID() : `msg_${Date.now()}`;
       const assistantMsg: LlamaMessage = {
         id: assistantMsgId, convId, role: 'assistant', type: 'text',
         content: fullContent, parent: userMsgId, children: [],
         timestamp: Date.now(), model: modelToUse,
-        completionId: completionId || '', timings,
-        toolCalls: '',
+        completionId: completionId || '', timings, toolCalls: '',
       };
       await this.saveMessage(assistantMsg);
       await this.addChildToMessage(userMsgId, assistantMsgId);
 
-      // Atualiza conversa
       if (conv) {
         conv.currNode = assistantMsgId;
         conv.lastModified = Date.now();
         await this.saveConversation(conv);
       }
 
-      // Append no arquivo JSONL
       try {
         const chatDir = path.join(process.cwd(), '.carcara', 'chats');
         await fs.mkdir(chatDir, { recursive: true });
@@ -999,22 +746,11 @@ export class CarcaraClient {
       logger.info({ chars: fullContent.length, finishReason }, 'Stream completo');
     });
 
-    sourceStream.on('error', (err: any) => {
-      passThrough.destroy(err);
-    });
-
+    sourceStream.on('error', (err: any) => { passThrough.destroy(err); });
     return passThrough;
   }
 
-  // ==========================================================================
-  // CONTINUE GENERATION (quebra limite de 4096 tokens)
-  // ==========================================================================
-
-  async chatCompletionWithContinue(
-    prompt: string,
-    model?: string,
-    tools?: any[]
-  ): Promise<ChatCompletionResponse> {
+  async chatCompletionWithContinue(prompt: string, model?: string, tools?: any[]): Promise<ChatCompletionResponse> {
     this.ensureInitialized();
     let fullContent = '';
     let totalPromptTokens = 0;
@@ -1033,163 +769,95 @@ export class CarcaraClient {
       const response = await this.chatCompletion(currentPrompt, model, tools);
       const choice = response.choices[0];
       const content = choice.message.content || '';
-
       fullContent += content;
       lastCompletionId = response.id;
       lastTimings = response.timings;
       lastToolCalls = choice.message.tool_calls;
-
       totalPromptTokens += response.usage?.prompt_tokens || 0;
       totalCompletionTokens += response.usage?.completion_tokens || 0;
 
-      if (choice.finish_reason !== 'length') {
-        break; // terminou naturalmente
-      }
-
+      if (choice.finish_reason !== 'length') break;
       attempts++;
       logger.info({ attempt: attempts, chars: fullContent.length }, 'Continue generation');
     }
 
-    // Retorna uma response "fake" com o conteúdo concatenado
     return {
       id: lastCompletionId || `chatcmpl-${Date.now()}`,
-      object: 'chat.completion',
-      created: Math.floor(Date.now() / 1000),
+      object: 'chat.completion', created: Math.floor(Date.now() / 1000),
       model: model || this.getDefaultModel(),
       choices: [{
-        index: 0,
-        message: {
-          role: 'assistant',
-          content: fullContent,
-          tool_calls: lastToolCalls,
-        },
+        index: 0, message: { role: 'assistant', content: fullContent, tool_calls: lastToolCalls },
         finish_reason: attempts > 0 ? 'stop' : (lastToolCalls?.length ? 'tool_calls' : 'stop'),
       }],
-      usage: {
-        prompt_tokens: totalPromptTokens,
-        completion_tokens: totalCompletionTokens,
-        total_tokens: totalPromptTokens + totalCompletionTokens,
-      },
+      usage: { prompt_tokens: totalPromptTokens, completion_tokens: totalCompletionTokens, total_tokens: totalPromptTokens + totalCompletionTokens },
     };
   }
 
-  async chatCompletion(
-    prompt: string,
-    model?: string,
-    tools?: any[]
-  ): Promise<ChatCompletionResponse> {
+  async chatCompletion(prompt: string, model?: string, tools?: any[]): Promise<ChatCompletionResponse> {
     this.ensureInitialized();
-    if (!this.currentConversationId) {
-      await this.createNewConversation();
-    }
+    if (!this.currentConversationId) await this.createNewConversation();
 
     const modelToUse = model || this.getDefaultModel();
     const convId = this.currentConversationId!;
 
-    // Busca conversa para saber o currNode (última mensagem ativa)
     const conversations = await this.getConversations();
     const conv = conversations.find(c => c.id === convId);
     const parentId = conv?.currNode || null;
 
-    // Cria mensagem do usuário
     const userMsgId = crypto.randomUUID ? crypto.randomUUID() : `msg_${Date.now()}`;
     const userMsg: LlamaMessage = {
-      id: userMsgId,
-      convId,
-      role: 'user',
-      type: 'text',
-      content: prompt,
-      parent: parentId,
-      children: [],
-      timestamp: Date.now(),
+      id: userMsgId, convId, role: 'user', type: 'text', content: prompt,
+      parent: parentId, children: [], timestamp: Date.now(),
     };
     await this.saveMessage(userMsg);
+    if (parentId) await this.addChildToMessage(parentId, userMsgId);
 
-    // Atualiza parent (adiciona este userMsg aos children do pai)
-    if (parentId) {
-      await this.addChildToMessage(parentId, userMsgId);
-    }
-
-    // Aplica sandbox de thinking (enriquece prompt com contexto da web)
     const enrichedPrompt = await this.thinkingService.executeSandbox(prompt);
 
     const payload: any = {
-      model: modelToUse,
-      messages: [{ role: 'user', content: enrichedPrompt }],
-      stream: false,
-      temperature: DEFAULT_TEMPERATURE,
-      max_tokens: DEFAULT_MAX_TOKENS,
-      return_progress: true,
-      backend_sampling: false,
-      timings_per_token: false,
+      model: modelToUse, messages: [{ role: 'user', content: enrichedPrompt }],
+      stream: false, temperature: DEFAULT_TEMPERATURE, max_tokens: DEFAULT_MAX_TOKENS,
+      return_progress: true, backend_sampling: false, timings_per_token: false,
     };
 
-    // Aplica config de thinking (enable_thinking, budget_tokens, etc.)
     this.thinkingService.applyToPayload(payload);
-
-    if (tools?.length) payload.tools = tools;
     if (tools?.length) payload.tools = tools;
 
     logger.info({ model: modelToUse }, 'Enviando para modelo');
 
     const response = await this.axiosInstance.post(CHAT_API, payload, {
-      baseURL: this.config.apiBaseUrl,
-      timeout: TIMEOUT_CHAT,
+      baseURL: this.config.apiBaseUrl, timeout: TIMEOUT_CHAT,
     });
 
     const choice = response.data.choices[0];
-
-    // Cria mensagem do assistant com dados reais do modelo
     const assistantMsgId = crypto.randomUUID ? crypto.randomUUID() : `msg_${Date.now()}`;
     const assistantMsg: LlamaMessage = {
-      id: assistantMsgId,
-      convId,
-      role: 'assistant',
-      type: 'text',
-      content: choice.message.content || '',
-      parent: userMsgId,
-      children: [],
-      timestamp: Date.now(),
-      model: modelToUse,
+      id: assistantMsgId, convId, role: 'assistant', type: 'text',
+      content: choice.message.content || '', parent: userMsgId, children: [],
+      timestamp: Date.now(), model: modelToUse,
       completionId: response.data.id || '',
       timings: choice.timings || response.data.timings,
       toolCalls: choice.message.tool_calls ? JSON.stringify(choice.message.tool_calls) : '',
     };
     await this.saveMessage(assistantMsg);
-
-    // Atualiza userMsg (adiciona assistant como filho)
     await this.addChildToMessage(userMsgId, assistantMsgId);
 
-    // Atualiza conversa: currNode aponta para a resposta do assistant
     if (conv) {
       conv.currNode = assistantMsgId;
       conv.lastModified = Date.now();
       await this.saveConversation(conv);
     }
 
-    // Salva em arquivo unico por conversa (append, nao sobrescreve)
     try {
       const chatDir = path.join(process.cwd(), '.carcara', 'chats');
       await fs.mkdir(chatDir, { recursive: true });
       const filePath = path.join(chatDir, `${convId}.jsonl`);
-
-      const entry = JSON.stringify({
-        timestamp: new Date().toISOString(),
-        model: modelToUse,
-        role: 'user',
-        content: prompt,
-      }) + '\n';
-
+      const entry = JSON.stringify({ timestamp: new Date().toISOString(), model: modelToUse, role: 'user', content: prompt }) + '\n';
       const responseEntry = JSON.stringify({
-        timestamp: new Date().toISOString(),
-        model: modelToUse,
-        role: 'assistant',
-        content: choice.message.content,
-        toolCalls: choice.message.tool_calls || null,
-        completionId: response.data.id,
-        timings: choice.timings || response.data.timings,
+        timestamp: new Date().toISOString(), model: modelToUse, role: 'assistant',
+        content: choice.message.content, toolCalls: choice.message.tool_calls || null,
+        completionId: response.data.id, timings: choice.timings || response.data.timings,
       }) + '\n';
-
       await fs.appendFile(filePath, entry + responseEntry, 'utf-8');
       logger.info({ file: `${convId}.jsonl` }, 'Mensagens appendadas');
     } catch (e: any) {
@@ -1199,10 +867,6 @@ export class CarcaraClient {
     logger.info('Resposta salva no IndexedDB');
     return response.data;
   }
-
-  // ==========================================================================
-  // MANIPULAÇÃO DE ÁRVORE (parent/children)
-  // ==========================================================================
 
   async addChildToMessage(parentId: string | number, childId: string | number): Promise<void> {
     this.ensureInitialized();
@@ -1238,7 +902,6 @@ export class CarcaraClient {
   async getMessageTree(convId: string): Promise<LlamaMessage[]> {
     this.ensureInitialized();
     const messages = await this.getConversationMessages(convId);
-    // Ordena por timestamp mas mantém estrutura de árvore
     return messages.sort((a, b) => a.timestamp - b.timestamp);
   }
 
@@ -1284,10 +947,6 @@ export class CarcaraClient {
     }
   }
 
-  // ==========================================================================
-  // LIMPEZA
-  // ==========================================================================
-
   private async cleanup(): Promise<void> {
     if (this.browser) {
       await this.browser.close();
@@ -1317,14 +976,12 @@ export class CarcaraClient {
     return this.availableModels;
   }
 
-  get thinking(): ThinkingService {
-    return this.thinkingService;
+  get llamaUI(): LlamaUIConfigService {
+    if (this.page && !this.page.isClosed()) this.llamaUIConfig.setPage(this.page);
+    return this.llamaUIConfig;
   }
 
-  get llamaUI(): LlamaUIConfigService {
-    if (this.page && !this.page.isClosed()) {
-      this.llamaUIConfig.setPage(this.page);
-    }
-    return this.llamaUIConfig;
+  async close(): Promise<void> {
+    await this.cleanup();
   }
 }
