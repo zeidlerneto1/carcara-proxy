@@ -3,7 +3,7 @@ import { AgentEngine } from './agent-engine.js';
 import { MemoryService } from './memory-service.js';
 import { MetricsService } from './metrics-service.js';
 import { CarcaraClient } from './carcara-client.js';
-import { ThinkingConfig, ThinkingLevel, CodeTaskInput, AgentTask } from './types.js';
+import { ThinkingConfig, ThinkingLevel, CodeTaskInput } from './types.js';
 import pino from 'pino';
 
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
@@ -54,11 +54,9 @@ export class ThinkingService {
     };
   }
 
-  /** Detecta intencao de agente e delega. Retorna resultado do agente ou null. */
   async detectAndRunAgent(prompt: string): Promise<string | null> {
     const lower = prompt.toLowerCase().trim();
 
-    // Padroes de ativacao de agente
     const patterns = [
       { regex: /^(?:\/agent|@agent)\s+(\w+)\s*(.*)/i, type: 'direct' },
       { regex: /^(?:gera|generate|escreve|write|cria|create)\s+(?:codigo|code|script|programa)/i, type: 'code' },
@@ -122,11 +120,9 @@ export class ThinkingService {
   }
 
   async executeSandbox(prompt: string, context?: string): Promise<string> {
-    // Primeiro tenta agente
     const agentResult = await this.detectAndRunAgent(prompt);
     if (agentResult !== null) return agentResult;
 
-    // Fallback: enriquecimento tradicional
     if (!this.config.sandboxEnabled || !this.config.enabled) return prompt;
 
     const enriched: string[] = [prompt];
@@ -177,12 +173,47 @@ export class ThinkingService {
   }
 
   private formatAgentResult(result: any): string {
-    if (result?.output?.code) {
-      return `\u250C\u2500\u2500\u2500 Agente: ${result.agentId} (score: ${result.output.score || '?'}) \u2510\n${result.output.code}\n\u2514\u2500\u2500\u2500 ${result.output.explanation || ''} \u2518`;
+    if (!result?.output) return JSON.stringify(result, null, 2);
+
+    // CodeLoopAgent result
+    if (result.output?.code) {
+      const iter = result.output as any;
+      const score = iter.score !== undefined ? `${(iter.score * 100).toFixed(0)}%` : '?';
+      const lines = [
+        `**Agente:** ${result.agentId} | **Score:** ${score} | **Iteracoes:** ${result.loopResult?.iterations?.length || 1}`,
+        '',
+        '```' + (iter.code?.match(/^\w+/)?.[0] || 'python'),
+        iter.code,
+        '```',
+      ];
+
+      if (iter.testResults?.length) {
+        lines.push('', '**Testes:**');
+        iter.testResults.forEach((t: any, i: number) => {
+          lines.push(`${i + 1}. ${t.passed ? '✅ PASSOU' : '❌ FALHOU'} (exit: ${t.exitCode})`);
+          if (t.stdout) lines.push(`   stdout: ${t.stdout.slice(0, 200)}`);
+          if (t.stderr) lines.push(`   stderr: ${t.stderr.slice(0, 200)}`);
+        });
+      }
+
+      return lines.join('\n');
     }
-    if (Array.isArray(result?.output)) {
+
+    // PromptEngineerAgent result (array)
+    if (Array.isArray(result.output)) {
       return result.output.map((o: any, i: number) => `${i + 1}. ${o.prompt || JSON.stringify(o)}`).join('\n');
     }
-    return JSON.stringify(result?.output, null, 2);
+
+    // TaskPlannerAgent result
+    if (result.output?.subTasks) {
+      const plan = result.output;
+      const lines = [`**Plano:** ${plan.objective}`, ''];
+      plan.subTasks.forEach((t: any) => {
+        lines.push(`- [${t.id}] ${t.description} → agente: ${t.agentId}`);
+      });
+      return lines.join('\n');
+    }
+
+    return JSON.stringify(result.output, null, 2);
   }
 }
