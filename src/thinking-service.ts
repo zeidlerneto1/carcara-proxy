@@ -62,6 +62,8 @@ export class ThinkingService {
       { regex: /^(?:gera|generate|escreve|write|cria|create)\s+(?:codigo|code|script|programa)/i, type: 'code' },
       { regex: /^(?:otimiza|optimize|melhora|improve)\s+(?:prompt|instrucao)/i, type: 'prompt' },
       { regex: /^(?:plano|plan|decompoe|break down)/i, type: 'plan' },
+      { regex: /^(?:react|pense|think|raciocine|reason|analise|analyze|investigue|investigate|resolva|solve)\b/i, type: 'react' },
+      { regex: /^(?:quanto|qual|quem|onde|quando|por que|como|what|who|where|when|why|how)\b/i, type: 'react' },
     ];
 
     for (const p of patterns) {
@@ -81,7 +83,7 @@ export class ThinkingService {
           const input = match[2] || prompt;
           const result = await this.agentEngine.run({
             id: `trigger_${Date.now()}`, agentId,
-            input: { description: input, language: 'python' },
+            input: agentId === 'react-loop' ? input : { description: input, language: 'python' },
           });
           return this.formatAgentResult(result);
         }
@@ -107,6 +109,15 @@ export class ThinkingService {
           const result = await this.agentEngine.run({
             id: `plan_${Date.now()}`, agentId: 'task-planner',
             input: prompt,
+          });
+          return this.formatAgentResult(result);
+        }
+
+        if (p.type === 'react') {
+          const result = await this.agentEngine.run({
+            id: `react_${Date.now()}`, agentId: 'react-loop',
+            input: prompt,
+            config: { maxSteps: 8 },
           });
           return this.formatAgentResult(result);
         }
@@ -174,6 +185,26 @@ export class ThinkingService {
 
   private formatAgentResult(result: any): string {
     if (!result?.output) return JSON.stringify(result, null, 2);
+
+    // ReActLoopAgent result
+    if (result.output?.steps) {
+      const react = result.output as any;
+      const lines = [
+        `**Agente:** ${result.agentId} | **Passos:** ${react.totalSteps} | **Convergiu:** ${react.converged ? '✅' : '⚠️'}`,
+        '',
+      ];
+      react.steps.forEach((s: any) => {
+        lines.push(`**Passo ${s.step}:** ${s.action}`);
+        lines.push(`> ${s.thought}`);
+        lines.push(`- Input: ${s.actionInput}`);
+        lines.push(`- Resultado: ${s.observation.slice(0, 300)}${s.observation.length > 300 ? '...' : ''}`);
+        lines.push('');
+      });
+      lines.push('---');
+      lines.push('**Resposta Final:**');
+      lines.push(react.finalAnswer);
+      return lines.join('\n');
+    }
 
     // CodeLoopAgent result
     if (result.output?.code) {

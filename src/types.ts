@@ -367,3 +367,26 @@ export interface CodeIteration {
   }[];
   score: number;
 }
+
+
+// ============================================================================
+// REACT LOOP
+// ============================================================================
+
+export interface ReActStep {
+  step: number;
+  thought: string;
+  action: string;
+  actionInput: string;
+  observation: string;
+  timestamp: number;
+}
+
+export interface ReActResult {
+  query: string;
+  steps: ReActStep[];
+  finalAnswer: string;
+  converged: boolean;
+  totalSteps: number;
+  durationMs: number;
+}

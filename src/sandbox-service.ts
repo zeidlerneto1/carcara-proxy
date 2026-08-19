@@ -23,15 +23,17 @@ export interface SandboxConfig {
   networkEnabled: boolean;
   readOnlyRoot: boolean;
   allowedLanguages: SandboxLanguage[];
+  containerPrefix: string;
 }
 
 const DEFAULT_CONFIG: SandboxConfig = {
   timeoutMs: 30000,
   memoryLimitMb: 256,
   cpuPercent: 50,
-  networkEnabled: false,
+  networkEnabled: true,        // ← INTERNET LIBERADA
   readOnlyRoot: true,
   allowedLanguages: ['python', 'javascript', 'bash'],
+  containerPrefix: 'carcara-proxy',
 };
 
 export class SandboxService {
@@ -76,6 +78,7 @@ export class SandboxService {
     }
 
     const runId = `run_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+    const containerName = `${this.config.containerPrefix}-${runId}`;
     const runDir = path.join(this.sandboxDir, runId);
     await fs.mkdir(runDir, { recursive: true });
 
@@ -83,22 +86,23 @@ export class SandboxService {
     const filePath = path.join(runDir, fileName);
     await fs.writeFile(filePath, code, 'utf-8');
 
-    logger.info({ runId, language, image }, 'Iniciando sandbox Docker');
+    logger.info({ runId, containerName, language, image, network: this.config.networkEnabled }, 'Iniciando sandbox Docker');
 
     const startTime = Date.now();
-    const result = await this.runDocker(image, cmd, runDir);
+    const result = await this.runDocker(image, cmd, runDir, containerName);
     const durationMs = Date.now() - startTime;
 
-    await this.cleanup(runDir, runId);
+    await this.cleanup(runDir, containerName);
 
-    logger.info({ runId, exitCode: result.exitCode, durationMs }, 'Sandbox completo');
+    logger.info({ runId, containerName, exitCode: result.exitCode, durationMs }, 'Sandbox completo');
     return { ...result, durationMs };
   }
 
-  private runDocker(image: string, cmd: string[], hostDir: string): Promise<SandboxResult> {
+  private runDocker(image: string, cmd: string[], hostDir: string, containerName: string): Promise<SandboxResult> {
     return new Promise((resolve) => {
       const args = [
         'run', '--rm',
+        '--name', containerName,           // ← NOME DO CONTAINER
         '--network=' + (this.config.networkEnabled ? 'bridge' : 'none'),
         '--memory=' + this.config.memoryLimitMb + 'm',
         '--memory-swap=' + this.config.memoryLimitMb + 'm',
@@ -168,8 +172,8 @@ export class SandboxService {
     }
   }
 
-  private async cleanup(hostDir: string, runId: string): Promise<void> {
-    try { spawn('docker', ['kill', runId]).unref(); } catch {}
+  private async cleanup(hostDir: string, containerName: string): Promise<void> {
+    try { spawn('docker', ['kill', containerName]).unref(); } catch {}
     try { await fs.rm(hostDir, { recursive: true, force: true }); } catch (e: any) {
       logger.warn({ error: e.message }, 'Falha ao limpar sandbox');
     }

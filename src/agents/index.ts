@@ -5,6 +5,7 @@ import { MetricsService } from '../metrics-service.js';
 import { CodeLoopAgent } from './code-loop-agent.js';
 import { PromptEngineerAgent } from './prompt-engineer-agent.js';
 import { TaskPlannerAgent } from './task-planner-agent.js';
+import { ReActLoopAgent } from './react-loop-agent.js';
 
 export function registerAllAgents(
   engine: AgentEngine,
@@ -55,5 +56,22 @@ export function registerAllAgents(
   }, async (task) => {
     metrics.record('agent.run', 1, { agent: 'task-planner' });
     return planner.execute(task);
+  });
+
+  const reactAgent = new ReActLoopAgent(client);
+  engine.register({
+    id: 'react-loop', name: 'ReAct Loop Agent',
+    description: 'Reasoning + Acting loop com search, code, calculate e final_answer',
+    version: '1.0.0',
+    capabilities: ['reasoning', 'web-search', 'code-execution', 'multi-step-problem-solving'],
+  }, async (task) => {
+    metrics.record('agent.run', 1, { agent: 'react-loop' });
+    const result = await reactAgent.execute(task);
+    await memory.add({
+      type: 'feedback', content: result.finalAnswer,
+      metadata: { taskId: task.id, steps: result.totalSteps, converged: result.converged },
+      tags: ['react-loop', result.converged ? 'success' : 'partial'],
+    });
+    return result;
   });
 }
