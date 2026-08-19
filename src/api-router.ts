@@ -34,6 +34,7 @@ export class CarcaraRouter {
   private agentEngine: AgentEngine;
   private memoryService: MemoryService;
   private metricsService: MetricsService;
+  private reactAgent: ReActLoopAgent;
   private port: number;
   private dockerAvailable: boolean = false;
 
@@ -45,6 +46,7 @@ export class CarcaraRouter {
     this.agentEngine = new AgentEngine();
     this.memoryService = new MemoryService();
     this.metricsService = new MetricsService();
+    // reactAgent inicializado via registerAllAgents
     this.app = express();
   }
 
@@ -68,7 +70,7 @@ export class CarcaraRouter {
     logger.info({ dockerAvailable: this.dockerAvailable }, 'Ambiente detectado');
 
     // Registra agentes
-    registerAllAgents(this.agentEngine, this.client, this.memoryService, this.metricsService);
+    this.reactAgent = registerAllAgents(this.agentEngine, this.client, this.memoryService, this.metricsService);
     this.client.setAgentEngine(this.agentEngine);
     this.client.setMemoryService(this.memoryService);
     this.client.setMetricsService(this.metricsService);
@@ -172,7 +174,52 @@ export class CarcaraRouter {
           }
         }
 
-        // === FLUXO NORMAL (sem agente) ===
+        // === REACT LOOP (comportamento padrao para perguntas complexas) ===
+    const shouldUseReAct = this.shouldUseReAct(userText);
+
+    if (shouldUseReAct) {
+      try {
+        logger.info({ model: modelName }, 'Iniciando ReAct loop');
+        const reactResult = await this.reactAgent.execute({
+          id: `react_${Date.now()}`,
+          agentId: 'react-loop',
+          input: userText,
+          config: { model: modelName, maxSteps: 15 },
+        });
+
+        const finalContent = reactResult.finalAnswer;
+
+        if (stream) {
+          res.setHeader('Content-Type', 'text/event-stream');
+          res.setHeader('Cache-Control', 'no-cache');
+          res.setHeader('Connection', 'keep-alive');
+          res.setHeader('X-Accel-Buffering', 'no');
+          res.flushHeaders();
+
+          const CHUNK_SIZE = 20;
+          for (let i = 0; i < finalContent.length; i += CHUNK_SIZE) {
+            const chunk = finalContent.slice(i, i + CHUNK_SIZE);
+            const delta = i === 0 ? { role: 'assistant', content: chunk } : { content: chunk };
+            res.write(`data: ${JSON.stringify({ id: completionId, object: 'chat.completion.chunk', created, model: modelName, choices: [{ index: 0, delta, finish_reason: null }] })}\n\n`);
+          }
+          res.write(`data: ${JSON.stringify({ id: completionId, object: 'chat.completion.chunk', created, model: modelName, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\n`);
+          res.write('data: [DONE]\n\n');
+          return res.end();
+        } else {
+          res.json({
+            id: completionId, object: 'chat.completion', created, model: modelName,
+            choices: [{ index: 0, message: { role: 'assistant', content: finalContent }, finish_reason: 'stop' }],
+            usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+          });
+          return;
+        }
+      } catch (reactErr: any) {
+        logger.error({ error: reactErr.message }, 'Erro no ReAct loop, fallback para fluxo normal');
+        // Continua para fluxo normal
+      }
+    }
+
+    // === FLUXO NORMAL (sem agente e sem ReAct) ===
         const response = await this.client.chatCompletion(prompt, model, tools);
         const content = response?.choices?.[0]?.message?.content || '';
         const toolCalls: ToolCall[] | undefined = response?.choices?.[0]?.message?.tool_calls;
@@ -619,4 +666,5 @@ export class CarcaraRouter {
 }
 
 import pino from 'pino';
+import { ReActLoopAgent } from './agents/react-loop-agent.js';
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
