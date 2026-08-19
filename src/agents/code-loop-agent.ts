@@ -23,7 +23,6 @@ export class CodeLoopAgent {
       throw new Error('Docker nao disponivel. CodeLoopAgent requer Docker.');
     }
 
-    // Gera testes automaticos se nao fornecidos
     const enrichedInput = this.enrichWithAutoTests(input);
 
     let currentCode = await this.generateCode(enrichedInput, model);
@@ -70,7 +69,6 @@ export class CodeLoopAgent {
   private enrichWithAutoTests(input: CodeTaskInput): CodeTaskInput {
     if (input.testCases && input.testCases.length > 0) return input;
 
-    // Gera testes automaticos baseado na descricao
     const autoTests: string[] = [];
     const desc = input.description.toLowerCase();
 
@@ -93,7 +91,6 @@ export class CodeLoopAgent {
       autoTests.push('assert is_palindrome("ana") == True');
       autoTests.push('assert is_palindrome("hello") == False');
     } else {
-      // Teste generico: verifica se o codigo roda sem erro
       autoTests.push('# Teste basico: verifica execucao sem erro\nprint("OK")');
     }
 
@@ -108,11 +105,12 @@ REGRAS OBRIGATORIAS:
 2. O codigo deve ser 100% auto-executavel — defina funcoes e chame-as no final com valores de exemplo
 3. Use apenas valores hardcoded ou parametros de funcao
 4. A saida deve ser via print() com resultado claro
+5. NAO inclua a palavra "${input.language}" como primeira linha do codigo
 
 ${input.constraints ? `Restricoes: ${input.constraints}` : ''}
 ${input.testCases ? `Testes que devem passar:\n${input.testCases.join('\n')}` : ''}
 
-Forneca APENAS o codigo, sem explicacoes.`;
+Forneca APENAS o codigo dentro de bloco markdown, sem explicacoes adicionais.`;
 
     const response = await this.client.chatCompletion(prompt, model);
     return this.extractCode(response.choices[0].message.content, input.language);
@@ -141,8 +139,9 @@ REGRAS DE CORRECAO:
 2. Substitua input() por valores hardcoded ou parametros de funcao
 3. Se houver funcoes, chame-as no final do arquivo com valores de exemplo
 4. A saida deve ser via print()
+5. NAO inclua a palavra "${input.language}" como primeira linha do codigo
 
-Forneca APENAS o codigo corrigido, sem explicacoes.`;
+Forneca APENAS o codigo corrigido dentro de bloco markdown, sem explicacoes.`;
 
     const response = await this.client.chatCompletion(prompt, model);
     return this.extractCode(response.choices[0].message.content, input.language);
@@ -180,6 +179,7 @@ Forneca APENAS o codigo corrigido, sem explicacoes.`;
   }
 
   private extractCode(text: string, language: string): string {
+    // Tenta extrair de bloco markdown
     const patterns = [
       new RegExp(`\`\`\`(?:${language}|)\n([\s\S]*?)\n\`\`\``),
       /\`\`\`\n([\s\S]*?)\n\`\`\`/,
@@ -187,8 +187,22 @@ Forneca APENAS o codigo corrigido, sem explicacoes.`;
     ];
     for (const p of patterns) {
       const m = text.match(p);
-      if (m) return m[1].trim();
+      if (m) {
+        let code = m[1].trim();
+        // Remove linha inicial que seja apenas o nome da linguagem (ex: "python\ndef add()...")
+        const firstLine = code.split('\n')[0].trim().toLowerCase();
+        if (firstLine === language || firstLine === language.slice(0, 2)) {
+          code = code.split('\n').slice(1).join('\n').trim();
+        }
+        return code;
+      }
     }
-    return text.trim();
+    // Se nao achou markdown, limpa texto cru
+    let cleaned = text.trim();
+    const firstLine = cleaned.split('\n')[0].trim().toLowerCase();
+    if (firstLine === language || firstLine === language.slice(0, 2)) {
+      cleaned = cleaned.split('\n').slice(1).join('\n').trim();
+    }
+    return cleaned;
   }
 }
