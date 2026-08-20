@@ -175,6 +175,7 @@ export class CarcaraRouter {
         }
 
         // === REACT LOOP (comportamento padrao para perguntas complexas) ===
+    const userText = this.extractText(lastMsg.content);
     const shouldUseReAct = this.shouldUseReAct(userText);
 
     if (shouldUseReAct) {
