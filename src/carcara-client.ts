@@ -868,6 +868,119 @@ export class CarcaraClient {
     return response.data;
   }
 
+
+  /**
+   * Envia um array de mensagens completo para o modelo.
+   * Usado pelo ChatUseCase para tool calling nativo com histórico.
+   */
+  async chatCompletionMessages(
+    messages: any[],
+    model?: string,
+    tools?: any[]
+  ): Promise<ChatCompletionResponse> {
+    this.ensureInitialized();
+
+    const modelToUse = model || this.getDefaultModel();
+    const convId = this.currentConversationId || `conv_${Date.now()}`;
+
+    const payload: any = {
+      model: modelToUse,
+      messages,
+      stream: false,
+      temperature: DEFAULT_TEMPERATURE,
+      max_tokens: DEFAULT_MAX_TOKENS,
+      return_progress: true,
+      backend_sampling: false,
+      timings_per_token: false,
+    };
+
+    this.thinkingService.applyToPayload(payload);
+    if (tools?.length) payload.tools = tools;
+
+    logger.info(
+      { model: modelToUse, msgCount: messages.length, toolCount: tools?.length || 0 },
+      'Enviando messages array para modelo'
+    );
+
+    const response = await this.axiosInstance.post(CHAT_API, payload, {
+      baseURL: this.config.apiBaseUrl,
+      timeout: TIMEOUT_CHAT,
+    });
+
+    const choice = response.data.choices[0];
+
+    // Persiste no IndexedDB (melhor esforço)
+    try {
+      const lastUser = messages.filter((m: any) => m.role === 'user').pop();
+      if (lastUser) {
+        const userMsgId = crypto.randomUUID
+          ? crypto.randomUUID()
+          : `msg_${Date.now()}`;
+        await this.saveMessage({
+          id: userMsgId,
+          convId,
+          role: 'user',
+          type: 'text',
+          content:
+            typeof lastUser.content === 'string'
+              ? lastUser.content
+              : JSON.stringify(lastUser.content),
+          parent: null,
+          children: [],
+          timestamp: Date.now(),
+        } as any);
+
+        const assistantMsgId = crypto.randomUUID
+          ? crypto.randomUUID()
+          : `msg_${Date.now()}`;
+        await this.saveMessage({
+          id: assistantMsgId,
+          convId,
+          role: 'assistant',
+          type: 'text',
+          content: choice.message.content || '',
+          parent: userMsgId,
+          children: [],
+          timestamp: Date.now(),
+          model: modelToUse,
+          completionId: response.data.id || '',
+          timings: choice.timings || response.data.timings,
+          toolCalls: choice.message.tool_calls
+            ? JSON.stringify(choice.message.tool_calls)
+            : '',
+        } as any);
+        await this.addChildToMessage(userMsgId, assistantMsgId);
+      }
+    } catch (dbErr: any) {
+      logger.warn({ error: dbErr.message }, 'Falha ao persistir messages no IndexedDB');
+    }
+
+    return {
+      id: response.data.id || `chatcmpl-${Date.now()}`,
+      object: 'chat.completion',
+      created: Math.floor(Date.now() / 1000),
+      model: modelToUse,
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: 'assistant',
+            content: choice.message.content || '',
+            tool_calls: choice.message.tool_calls,
+          },
+          finish_reason:
+            choice.finish_reason ||
+            (choice.message.tool_calls?.length ? 'tool_calls' : 'stop'),
+        },
+      ],
+      usage: response.data.usage || {
+        prompt_tokens: 0,
+        completion_tokens: 0,
+        total_tokens: 0,
+      },
+    };
+  }
+
   async addChildToMessage(parentId: string | number, childId: string | number): Promise<void> {
     this.ensureInitialized();
     await this.executeInBrowser(`
