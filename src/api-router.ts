@@ -70,7 +70,7 @@ export class CarcaraRouter {
     logger.info({ dockerAvailable: this.dockerAvailable }, 'Ambiente detectado');
 
     // Registra agentes
-    this.reactAgent = registerAllAgents(this.agentEngine, this.client, this.memoryService, this.metricsService);
+    this.reactAgent = registerAllAgents(this.agentEngine, this.client, this.memoryService, this.metricsService, this.dockerAvailable);
     this.client.setAgentEngine(this.agentEngine);
     this.client.setMemoryService(this.memoryService);
     this.client.setMetricsService(this.metricsService);
