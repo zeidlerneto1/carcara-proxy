@@ -14,8 +14,6 @@ import { MetricsService } from '../metrics-service.js';
 import { registerAllAgents } from '../agents/index.js';
 import { ChatUseCase } from '../application/use-cases/chat-use-case.js';
 import { ChatMessage, ToolCall, AgentTask, CodeTaskInput } from '../types.js';
-import { DockerManager } from '../infrastructure/services/docker-manager.js';
-import { SSHContainerService } from '../infrastructure/services/ssh-container-service.js';
 import { Readable } from 'stream';
 
 const limiter = rateLimit({
@@ -39,7 +37,6 @@ export class CarcaraRouter {
   private metricsService: MetricsService;
   private reactAgent: any;
   private chatUseCase: ChatUseCase;
-  private sshContainer: SSHContainerService;
   private port: number;
   private dockerAvailable: boolean = false;
 
@@ -57,7 +54,6 @@ export class CarcaraRouter {
       this.searchService as any,
       false
     );
-    this.sshContainer = new SSHContainerService();
     this.app = express();
   }
 
@@ -84,18 +80,6 @@ export class CarcaraRouter {
       this.dockerAvailable
     );
     logger.info({ dockerAvailable: this.dockerAvailable }, 'Ambiente detectado');
-
-    // Inicia SSH Bastion no startup
-    if (this.dockerAvailable) {
-      try {
-        const sshStatus = await this.sshContainer.init();
-        logger.info({ connect: sshStatus.connectCommand }, 'SSH Bastion iniciado');
-        // Conecta SandboxService ao SSH Container (modo rápido)
-        this.sandboxService.setSSHContainer(this.sshContainer);
-      } catch (sshErr: any) {
-        logger.error({ error: sshErr.message }, 'Falha ao iniciar SSH Bastion');
-      }
-    }
 
     this.reactAgent = registerAllAgents(this.agentEngine, this.client, this.memoryService, this.metricsService, this.dockerAvailable);
     this.client.setAgentEngine(this.agentEngine);
@@ -131,10 +115,8 @@ export class CarcaraRouter {
       } catch (error: any) { res.status(500).json({ error: error.message }); }
     });
 
-    // Chat completions com Tool Calling Nativo + Agente
     this.app.post('/v1/chat/completions', strictLimiter, async (req: Request, res: Response) => {
       try {
-        // Verifica se é requisição de agente
         const agentId = req.headers['x-carcara-agent'] as string;
         if (agentId && req.body.messages?.length) {
           try {
@@ -158,7 +140,6 @@ export class CarcaraRouter {
           }
         }
 
-        // Chat normal com Tool Calling
         const { model, messages, stream, tools: clientTools } = req.body;
         const msgs: ChatMessage[] = messages || [];
         if (!msgs.length) return res.status(400).json({ error: 'Messages are required' });
@@ -377,56 +358,16 @@ export class CarcaraRouter {
     this.app.get('/ping', (_req: Request, res: Response) => res.json({ pong: true }));
 
     // ==========================================
-    // SSH BASTION
-    // ==========================================
-
-    this.app.get('/api/ssh/status', (_req: Request, res: Response) => {
-      try {
-        const status = this.sshContainer.getStatus();
-        res.json({
-          ...status,
-          dockerAvailable: this.dockerAvailable,
-          hint: status.running 
-            ? `Conecte-se: ${status.connectCommand} (senha: carcara123)`
-            : 'Container SSH não está rodando',
-        });
-      } catch (error: any) { res.status(500).json({ error: error.message }); }
-    });
-
-    this.app.post('/api/ssh/exec', async (req: Request, res: Response) => {
-      try {
-        const { command, asUser } = req.body;
-        if (!command) return res.status(400).json({ error: 'command is required' });
-        if (!this.dockerAvailable) return res.status(503).json({ error: 'Docker não disponível' });
-        const result = await this.sshContainer.exec(command, asUser !== false);
-        res.json({ success: true, ...result });
-      } catch (error: any) { res.status(500).json({ error: error.message }); }
-    });
-
-    this.app.post('/api/ssh/exec-code', async (req: Request, res: Response) => {
-      try {
-        const { code, language } = req.body;
-        if (!code) return res.status(400).json({ error: 'code is required' });
-        if (!language) return res.status(400).json({ error: 'language is required' });
-        if (!this.dockerAvailable) return res.status(503).json({ error: 'Docker não disponível' });
-        const result = await this.sshContainer.executeCode(code, language);
-        res.json({ success: true, ...result, mode: 'ssh-container' });
-      } catch (error: any) { res.status(500).json({ error: error.message }); }
-    });
-
-    // ==========================================
     // SANDBOX
     // ==========================================
 
     this.app.get('/api/sandbox/status', async (_req: Request, res: Response) => {
       try {
-        const dockerManager = this.sandboxService.getDockerManager();
         res.json({
           dockerAvailable: this.dockerAvailable,
           dockerConfig: this.sandboxService.getConfig(),
           mode: this.dockerAvailable ? 'docker-persistent' : 'unavailable',
           containers: this.sandboxService.listContainers(),
-          environment: dockerManager.getEnvironmentInfo(),
           agents: this.agentEngine.list().map(a => ({ id: a.id, name: a.name, capabilities: a.capabilities })),
         });
       } catch (error: any) { res.status(500).json({ error: error.message }); }
@@ -475,32 +416,6 @@ export class CarcaraRouter {
           await this.sandboxService.cleanupAll();
           res.json({ success: true, message: 'Todos os containers destruídos' });
         }
-      } catch (error: any) { res.status(500).json({ error: error.message }); }
-    });
-
-    // ==========================================
-    // ENVIRONMENT
-    // ==========================================
-
-    this.app.get('/api/environment', (_req: Request, res: Response) => {
-      try {
-        const dockerManager = this.sandboxService.getDockerManager();
-        res.json({
-          os: dockerManager.getOS(),
-          isWindows: dockerManager.isWindows(),
-          isLinux: dockerManager.isLinux(),
-          environment: dockerManager.getEnvironmentInfo(),
-          docker: {
-            available: this.dockerAvailable,
-            manager: dockerManager.getOS(),
-          },
-          sandbox: {
-            mode: this.dockerAvailable ? 'docker-persistent' : 'unavailable',
-            containers: this.sandboxService.listContainers().length,
-            config: this.sandboxService.getConfig(),
-          },
-          agents: this.agentEngine.list().map(a => ({ id: a.id, name: a.name })),
-        });
       } catch (error: any) { res.status(500).json({ error: error.message }); }
     });
 
@@ -584,7 +499,7 @@ export class CarcaraRouter {
     return new Promise<void>((resolve) => {
       this.app.listen(this.port, () => {
         console.log('╔═══════════════════════════════════════════════════════════════╗');
-        console.log('║      🤖 Carcara Proxy v3.1 - N-Layers + SSH Bastion          ║');
+        console.log('║      🤖 Carcara Proxy v3.1 - N-Layers                        ║');
         console.log('║         Docker: ' + (this.dockerAvailable ? '✅' : '❌') + ' | Agents: ' + this.agentEngine.list().length + '         ║');
         console.log('╠═══════════════════════════════════════════════════════════════╣');
         console.log(`║  🌐 http://localhost:${this.port}                           ║`);
@@ -592,7 +507,6 @@ export class CarcaraRouter {
         console.log('║  📋 Ollama: /api/health, /api/tags, /api/chat, /api/generate  ║');
         console.log('║  🔧 MCP: /mcp/list, /mcp/call                                ║');
         console.log('║  🐳 Sandbox: /api/sandbox/exec (Docker Persistente)            ║');
-        console.log('║  🔐 SSH: localhost:2222 (user: carcara, pass: carcara123)    ║');
         console.log('║  🔍 Search: /api/search, /api/search/ddg, /api/search/wiki     ║');
         console.log('║  🤖 Agentes: detectados automaticamente no chat               ║');
         console.log('║  🧠 Memoria: .carcara/memory.jsonl                            ║');
@@ -641,7 +555,6 @@ export class CarcaraRouter {
   }
 
   async stop(): Promise<void> {
-    await this.sshContainer.destroy();
     await this.sandboxService.cleanupAll();
     await this.client.close();
     this.metricsService.stop();
