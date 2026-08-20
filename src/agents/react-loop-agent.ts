@@ -56,12 +56,14 @@ export class ReActLoopAgent {
   private search: SearchService;
   private customTools: Map<string, ReActTool> = new Map();
   private loopEngine: LoopEngineering<any>;
+  private dockerAvailable: boolean;
 
-  constructor(client: CarcaraClient) {
+  constructor(client: CarcaraClient, dockerAvailable: boolean = false) {
     this.client = client;
     this.sandbox = new SandboxService();
     this.search = new SearchService();
     this.loopEngine = new LoopEngineering({ maxIterations: 15, convergenceThreshold: 0.9 });
+    this.dockerAvailable = dockerAvailable;
     this.registerDefaultTools();
   }
 
@@ -87,9 +89,11 @@ export class ReActLoopAgent {
     const maxSteps = (task.config?.maxSteps as number) || 15;
     const conversationHistory = (task.config?.history as string) || '';
 
-    const dockerOk = await this.sandbox.detectDocker();
+    const dockerOk = this.dockerAvailable;
     if (!dockerOk) {
-      logger.warn('Docker indisponivel. ReAct rodara sem sandbox de codigo.');
+      logger.warn('Docker indisponivel. ReAct rodara em modo local (HOST).');
+    } else {
+      logger.info('Docker disponivel. ReAct usara sandbox isolado.');
     }
 
     const steps: ReActStep[] = [];
