@@ -377,17 +377,6 @@ export class CarcaraRouter {
     });
 
     // Redirecionamento para compatibilidade
-    this.app.get('/api/sandbox/status', async (_req: Request, res: Response) => {
-      try {
-        res.json({
-          dockerAvailable: this.dockerAvailable,
-          dockerConfig: this.sandboxService.getConfig(),
-          mode: this.dockerAvailable ? 'docker-persistent' : 'unavailable',
-          containers: this.sandboxService.listContainers(),
-          agents: this.agentEngine.list().map(a => ({ id: a.id, name: a.name, capabilities: a.capabilities })),
-        });
-      } catch (error: any) { res.status(500).json({ error: error.message }); }
-    });
 
     this.app.post('/api/sandbox/exec', async (req: Request, res: Response) => {
       try {
