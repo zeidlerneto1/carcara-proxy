@@ -479,35 +479,6 @@ export class CarcaraRouter {
     // AGENTES
     // ==========================================
 
-    this.app.post('/v1/chat/completions', strictLimiter, async (req: Request, res: Response) => {
-      const agentId = req.headers['x-carcara-agent'] as string;
-      if (agentId && req.body.messages?.length) {
-        try {
-          const lastMsg = req.body.messages[req.body.messages.length - 1];
-          const result = await this.agentEngine.run({
-            id: `api_${Date.now()}`, agentId,
-            input: { description: this.extractText(lastMsg.content), language: 'python' },
-            config: req.body.config || {},
-          });
-          res.json({
-            id: `agent-${Date.now()}`, object: 'chat.completion',
-            created: Math.floor(Date.now() / 1000),
-            model: req.body.model || 'agent',
-            choices: [{ index: 0, message: { role: 'assistant', content: JSON.stringify(result.output, null, 2) }, finish_reason: 'stop' }],
-            usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
-          });
-          return;
-        } catch (error: any) {
-          res.status(500).json({ error: error.message });
-          return;
-        }
-      }
-    });
-
-    // ==========================================
-    // LLAMAUI CONFIG
-    // ==========================================
-
     this.app.get('/api/config', async (_req: Request, res: Response) => {
       try { const config = await this.client.llamaUI.getConfig(); res.json({ config }); }
       catch (error: any) { res.status(500).json({ error: error.message }); }
