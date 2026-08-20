@@ -4,6 +4,7 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import pino from 'pino';
 import { DockerManager } from './docker-manager.js';
+import { SSHContainerService } from './ssh-container-service.js';
 
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
 const execAsync = promisify(exec);
@@ -68,11 +69,14 @@ export class SandboxService {
   private containers = new Map<string, PersistentContainer>();
   private cleanupTimers = new Map<string, NodeJS.Timeout>();
   private dockerManager: DockerManager;
+  private sshContainer: SSHContainerService | null = null;
+  private useSSHMode: boolean = false;
 
   constructor(config: Partial<SandboxConfig> = {}) {
     this.config = { ...DEFAULT_CONFIG, ...config };
     this.sandboxDir = path.join(process.cwd(), '.carcara', 'sandbox-runs');
     this.dockerManager = new DockerManager();
+    this.sshContainer = null;
     this.ensureDir().catch(() => {});
     this._startGlobalCleanup();
   }
@@ -171,6 +175,28 @@ export class SandboxService {
   }
 
   async execute(code: string, language: SandboxLanguage, sessionId?: string): Promise<SandboxResult> {
+    // Modo SSH Container: usa o container SSH persistente (mais rápido, não trava)
+    if (this.useSSHMode && this.sshContainer) {
+      logger.info({ language, mode: 'ssh-container' }, 'Executando via SSH Container');
+      const startTime = Date.now();
+      try {
+        const result = await this.sshContainer.executeCode(code, language);
+        const durationMs = Date.now() - startTime;
+        logger.info({ exitCode: result.exitCode, durationMs }, 'Execução SSH completa');
+        return {
+          stdout: result.stdout,
+          stderr: result.stderr,
+          exitCode: result.exitCode,
+          durationMs,
+          killed: false,
+        };
+      } catch (err: any) {
+        logger.error({ error: err.message }, 'Erro no SSH Container, fallback para Docker');
+        // Fallback para modo Docker tradicional
+      }
+    }
+
+    // Modo Docker tradicional
     const dockerOk = await this.detectDocker();
     if (!dockerOk) {
       const env = this.dockerManager.getEnvironmentInfo();
@@ -273,6 +299,12 @@ export class SandboxService {
         if (now - container.lastUsedAt > this.config.sessionTimeoutMs) this._destroyContainer(key);
       }
     }, 5 * 60 * 1000);
+  }
+
+  setSSHContainer(sshContainer: SSHContainerService): void {
+    this.sshContainer = sshContainer;
+    this.useSSHMode = true;
+    logger.info('SandboxService usando modo SSH Container');
   }
 
   setConfig(cfg: Partial<SandboxConfig>): void {
