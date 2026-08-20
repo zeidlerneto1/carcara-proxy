@@ -90,6 +90,8 @@ export class CarcaraRouter {
       try {
         const sshStatus = await this.sshContainer.init();
         logger.info({ connect: sshStatus.connectCommand }, 'SSH Bastion iniciado');
+        // Conecta SandboxService ao SSH Container (modo rápido)
+        this.sandboxService.setSSHContainer(this.sshContainer);
       } catch (sshErr: any) {
         logger.error({ error: sshErr.message }, 'Falha ao iniciar SSH Bastion');
       }
