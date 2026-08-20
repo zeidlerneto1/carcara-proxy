@@ -11,11 +11,11 @@ import { LlamaUIConfigService, MCPServerConfig } from '../llama-ui-config.js';
 import { AgentEngine } from '../application/agents/agent-engine.js';
 import { MemoryService } from '../memory-service.js';
 import { MetricsService } from '../metrics-service.js';
-import { DockerManager } from '../infrastructure/services/docker-manager.js';
-import { SSHContainerService } from '../infrastructure/services/ssh-container-service.js';
 import { registerAllAgents } from '../agents/index.js';
 import { ChatUseCase } from '../application/use-cases/chat-use-case.js';
 import { ChatMessage, ToolCall, AgentTask, CodeTaskInput } from '../types.js';
+import { DockerManager } from '../infrastructure/services/docker-manager.js';
+import { SSHContainerService } from '../infrastructure/services/ssh-container-service.js';
 import { Readable } from 'stream';
 
 const limiter = rateLimit({
@@ -131,9 +131,34 @@ export class CarcaraRouter {
       } catch (error: any) { res.status(500).json({ error: error.message }); }
     });
 
-    // Chat completions com Tool Calling Nativo
+    // Chat completions com Tool Calling Nativo + Agente
     this.app.post('/v1/chat/completions', strictLimiter, async (req: Request, res: Response) => {
       try {
+        // Verifica se é requisição de agente
+        const agentId = req.headers['x-carcara-agent'] as string;
+        if (agentId && req.body.messages?.length) {
+          try {
+            const lastMsg = req.body.messages[req.body.messages.length - 1];
+            const result = await this.agentEngine.run({
+              id: `api_${Date.now()}`, agentId,
+              input: { description: this.extractText(lastMsg.content), language: 'python' },
+              config: req.body.config || {},
+            });
+            res.json({
+              id: `agent-${Date.now()}`, object: 'chat.completion',
+              created: Math.floor(Date.now() / 1000),
+              model: req.body.model || 'agent',
+              choices: [{ index: 0, message: { role: 'assistant', content: JSON.stringify(result.output, null, 2) }, finish_reason: 'stop' }],
+              usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+            });
+            return;
+          } catch (error: any) {
+            res.status(500).json({ error: error.message });
+            return;
+          }
+        }
+
+        // Chat normal com Tool Calling
         const { model, messages, stream, tools: clientTools } = req.body;
         const msgs: ChatMessage[] = messages || [];
         if (!msgs.length) return res.status(400).json({ error: 'Messages are required' });
@@ -219,41 +244,6 @@ export class CarcaraRouter {
     // ==========================================
     // OLLAMA COMPATIBLE
     // ==========================================
-
-    this.app.get('/api/ssh/status', (_req: Request, res: Response) => {
-      try {
-        const status = this.sshContainer.getStatus();
-        res.json({
-          ...status,
-          dockerAvailable: this.dockerAvailable,
-          hint: status.running 
-            ? `Conecte-se: ${status.connectCommand} (senha: carcara123)`
-            : 'Container SSH não está rodando',
-        });
-      } catch (error: any) { res.status(500).json({ error: error.message }); }
-    });
-
-    this.app.get('/api/environment', (_req: Request, res: Response) => {
-      try {
-        const dockerManager = this.sandboxService.getDockerManager();
-        res.json({
-          os: dockerManager.getOS(),
-          isWindows: dockerManager.isWindows(),
-          isLinux: dockerManager.isLinux(),
-          environment: dockerManager.getEnvironmentInfo(),
-          docker: {
-            available: this.dockerAvailable,
-            manager: dockerManager.getOS(),
-          },
-          sandbox: {
-            mode: this.dockerAvailable ? 'docker-persistent' : 'unavailable',
-            containers: this.sandboxService.listContainers().length,
-            config: this.sandboxService.getConfig(),
-          },
-          agents: this.agentEngine.list().map(a => ({ id: a.id, name: a.name })),
-        });
-      } catch (error: any) { res.status(500).json({ error: error.message }); }
-    });
 
     this.app.get('/api/health', (_req: Request, res: Response) => {
       res.json({ status: 'ok', initialized: this.client.isReady, docker: this.dockerAvailable });
@@ -384,12 +374,30 @@ export class CarcaraRouter {
       res.json(await this.searchService.wikipedia(query));
     });
 
+    this.app.get('/ping', (_req: Request, res: Response) => res.json({ pong: true }));
+
+    // ==========================================
+    // SSH BASTION
+    // ==========================================
+
+    this.app.get('/api/ssh/status', (_req: Request, res: Response) => {
+      try {
+        const status = this.sshContainer.getStatus();
+        res.json({
+          ...status,
+          dockerAvailable: this.dockerAvailable,
+          hint: status.running 
+            ? `Conecte-se: ${status.connectCommand} (senha: carcara123)`
+            : 'Container SSH não está rodando',
+        });
+      } catch (error: any) { res.status(500).json({ error: error.message }); }
+    });
+
     this.app.post('/api/ssh/exec', async (req: Request, res: Response) => {
       try {
         const { command, asUser } = req.body;
         if (!command) return res.status(400).json({ error: 'command is required' });
         if (!this.dockerAvailable) return res.status(503).json({ error: 'Docker não disponível' });
-
         const result = await this.sshContainer.exec(command, asUser !== false);
         res.json({ success: true, ...result });
       } catch (error: any) { res.status(500).json({ error: error.message }); }
@@ -401,13 +409,10 @@ export class CarcaraRouter {
         if (!code) return res.status(400).json({ error: 'code is required' });
         if (!language) return res.status(400).json({ error: 'language is required' });
         if (!this.dockerAvailable) return res.status(503).json({ error: 'Docker não disponível' });
-
         const result = await this.sshContainer.executeCode(code, language);
         res.json({ success: true, ...result, mode: 'ssh-container' });
       } catch (error: any) { res.status(500).json({ error: error.message }); }
     });
-
-    this.app.get('/ping', (_req: Request, res: Response) => res.json({ pong: true }));
 
     // ==========================================
     // SANDBOX
@@ -426,8 +431,6 @@ export class CarcaraRouter {
         });
       } catch (error: any) { res.status(500).json({ error: error.message }); }
     });
-
-    // Redirecionamento para compatibilidade
 
     this.app.post('/api/sandbox/exec', async (req: Request, res: Response) => {
       try {
@@ -476,7 +479,33 @@ export class CarcaraRouter {
     });
 
     // ==========================================
-    // AGENTES
+    // ENVIRONMENT
+    // ==========================================
+
+    this.app.get('/api/environment', (_req: Request, res: Response) => {
+      try {
+        const dockerManager = this.sandboxService.getDockerManager();
+        res.json({
+          os: dockerManager.getOS(),
+          isWindows: dockerManager.isWindows(),
+          isLinux: dockerManager.isLinux(),
+          environment: dockerManager.getEnvironmentInfo(),
+          docker: {
+            available: this.dockerAvailable,
+            manager: dockerManager.getOS(),
+          },
+          sandbox: {
+            mode: this.dockerAvailable ? 'docker-persistent' : 'unavailable',
+            containers: this.sandboxService.listContainers().length,
+            config: this.sandboxService.getConfig(),
+          },
+          agents: this.agentEngine.list().map(a => ({ id: a.id, name: a.name })),
+        });
+      } catch (error: any) { res.status(500).json({ error: error.message }); }
+    });
+
+    // ==========================================
+    // LLAMAUI CONFIG
     // ==========================================
 
     this.app.get('/api/config', async (_req: Request, res: Response) => {
@@ -555,7 +584,7 @@ export class CarcaraRouter {
     return new Promise<void>((resolve) => {
       this.app.listen(this.port, () => {
         console.log('╔═══════════════════════════════════════════════════════════════╗');
-        console.log('║      🤖 Carcara Proxy v3.1 - N-Layers + Docker Persistente     ║');
+        console.log('║      🤖 Carcara Proxy v3.1 - N-Layers + SSH Bastion          ║');
         console.log('║         Docker: ' + (this.dockerAvailable ? '✅' : '❌') + ' | Agents: ' + this.agentEngine.list().length + '         ║');
         console.log('╠═══════════════════════════════════════════════════════════════╣');
         console.log(`║  🌐 http://localhost:${this.port}                           ║`);
@@ -570,7 +599,8 @@ export class CarcaraRouter {
         console.log('║  📊 Metricas: .carcara/metrics.jsonl                          ║');
         console.log('╚═══════════════════════════════════════════════════════════════╝');
         console.log(`║  📁 Sessao: .carcara/session.json                              ║`);
-        console.log('╚═══════════════════════════════════════════════════════════════╝');
+        console.log('╚═══════════════════════════════════════════════════════════════╝
+');
         resolve();
       });
     });
@@ -611,6 +641,7 @@ export class CarcaraRouter {
   }
 
   async stop(): Promise<void> {
+    await this.sshContainer.destroy();
     await this.sandboxService.cleanupAll();
     await this.client.close();
     this.metricsService.stop();
