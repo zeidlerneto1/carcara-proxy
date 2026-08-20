@@ -12,6 +12,7 @@ import { AgentEngine } from '../application/agents/agent-engine.js';
 import { MemoryService } from '../memory-service.js';
 import { MetricsService } from '../metrics-service.js';
 import { DockerManager } from '../infrastructure/services/docker-manager.js';
+import { SSHContainerService } from '../infrastructure/services/ssh-container-service.js';
 import { registerAllAgents } from '../agents/index.js';
 import { ChatUseCase } from '../application/use-cases/chat-use-case.js';
 import { ChatMessage, ToolCall, AgentTask, CodeTaskInput } from '../types.js';
@@ -38,6 +39,7 @@ export class CarcaraRouter {
   private metricsService: MetricsService;
   private reactAgent: any;
   private chatUseCase: ChatUseCase;
+  private sshContainer: SSHContainerService;
   private port: number;
   private dockerAvailable: boolean = false;
 
@@ -55,6 +57,7 @@ export class CarcaraRouter {
       this.searchService as any,
       false
     );
+    this.sshContainer = new SSHContainerService();
     this.app = express();
   }
 
@@ -81,6 +84,16 @@ export class CarcaraRouter {
       this.dockerAvailable
     );
     logger.info({ dockerAvailable: this.dockerAvailable }, 'Ambiente detectado');
+
+    // Inicia SSH Bastion no startup
+    if (this.dockerAvailable) {
+      try {
+        const sshStatus = await this.sshContainer.init();
+        logger.info({ connect: sshStatus.connectCommand }, 'SSH Bastion iniciado');
+      } catch (sshErr: any) {
+        logger.error({ error: sshErr.message }, 'Falha ao iniciar SSH Bastion');
+      }
+    }
 
     this.reactAgent = registerAllAgents(this.agentEngine, this.client, this.memoryService, this.metricsService, this.dockerAvailable);
     this.client.setAgentEngine(this.agentEngine);
@@ -204,6 +217,19 @@ export class CarcaraRouter {
     // ==========================================
     // OLLAMA COMPATIBLE
     // ==========================================
+
+    this.app.get('/api/ssh/status', (_req: Request, res: Response) => {
+      try {
+        const status = this.sshContainer.getStatus();
+        res.json({
+          ...status,
+          dockerAvailable: this.dockerAvailable,
+          hint: status.running 
+            ? `Conecte-se: ${status.connectCommand} (senha: carcara123)`
+            : 'Container SSH não está rodando',
+        });
+      } catch (error: any) { res.status(500).json({ error: error.message }); }
+    });
 
     this.app.get('/api/environment', (_req: Request, res: Response) => {
       try {
@@ -354,6 +380,29 @@ export class CarcaraRouter {
       const { query } = req.body;
       if (!query) return res.status(400).json({ error: 'Query is required' });
       res.json(await this.searchService.wikipedia(query));
+    });
+
+    this.app.post('/api/ssh/exec', async (req: Request, res: Response) => {
+      try {
+        const { command, asUser } = req.body;
+        if (!command) return res.status(400).json({ error: 'command is required' });
+        if (!this.dockerAvailable) return res.status(503).json({ error: 'Docker não disponível' });
+
+        const result = await this.sshContainer.exec(command, asUser !== false);
+        res.json({ success: true, ...result });
+      } catch (error: any) { res.status(500).json({ error: error.message }); }
+    });
+
+    this.app.post('/api/ssh/exec-code', async (req: Request, res: Response) => {
+      try {
+        const { code, language } = req.body;
+        if (!code) return res.status(400).json({ error: 'code is required' });
+        if (!language) return res.status(400).json({ error: 'language is required' });
+        if (!this.dockerAvailable) return res.status(503).json({ error: 'Docker não disponível' });
+
+        const result = await this.sshContainer.executeCode(code, language);
+        res.json({ success: true, ...result, mode: 'ssh-container' });
+      } catch (error: any) { res.status(500).json({ error: error.message }); }
     });
 
     this.app.get('/ping', (_req: Request, res: Response) => res.json({ pong: true }));
@@ -541,6 +590,7 @@ export class CarcaraRouter {
         console.log('║  📋 Ollama: /api/health, /api/tags, /api/chat, /api/generate  ║');
         console.log('║  🔧 MCP: /mcp/list, /mcp/call                                ║');
         console.log('║  🐳 Sandbox: /api/sandbox/exec (Docker Persistente)            ║');
+        console.log('║  🔐 SSH: localhost:2222 (user: carcara, pass: carcara123)    ║');
         console.log('║  🔍 Search: /api/search, /api/search/ddg, /api/search/wiki     ║');
         console.log('║  🤖 Agentes: detectados automaticamente no chat               ║');
         console.log('║  🧠 Memoria: .carcara/memory.jsonl                            ║');
