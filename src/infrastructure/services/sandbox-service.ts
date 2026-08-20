@@ -3,6 +3,7 @@ import { promisify } from 'util';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import pino from 'pino';
+import { DockerManager } from './docker-manager.js';
 
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
 const execAsync = promisify(exec);
@@ -50,34 +51,68 @@ interface PersistentContainer {
   workDir: string;
 }
 
+/**
+ * SandboxService com Docker Persistente e Cross-Platform Support.
+ * 
+ * - Usa DockerManager para detectar OS e estado do Docker
+ * - Container nomeado por sessão (carcara-sandbox-{sessionId})
+ * - Executa via docker exec (2-3s mais rápido)
+ * - Auto-inicia Docker Desktop no Windows se necessário
+ * - Estado persistente entre execuções
+ * - Cleanup automático após timeout
+ */
 export class SandboxService {
   private config: SandboxConfig;
   private sandboxDir: string;
   private _dockerAvailable: boolean | null = null;
   private containers = new Map<string, PersistentContainer>();
   private cleanupTimers = new Map<string, NodeJS.Timeout>();
+  private dockerManager: DockerManager;
 
   constructor(config: Partial<SandboxConfig> = {}) {
     this.config = { ...DEFAULT_CONFIG, ...config };
     this.sandboxDir = path.join(process.cwd(), '.carcara', 'sandbox-runs');
+    this.dockerManager = new DockerManager();
     this.ensureDir().catch(() => {});
     this._startGlobalCleanup();
   }
 
+  /** 
+   * Detecta Docker usando DockerManager (cross-platform).
+   * No Windows, tenta auto-iniciar Docker Desktop.
+   */
   async detectDocker(): Promise<boolean> {
     if (this._dockerAvailable !== null) return this._dockerAvailable;
-    try {
-      const { stdout } = await execAsync('docker version --format "{{.Server.Version}}"');
-      this._dockerAvailable = !!stdout.trim();
-    } catch {
-      this._dockerAvailable = false;
+
+    const status = await this.dockerManager.checkStatus();
+    this._dockerAvailable = status.available && status.running;
+
+    if (this._dockerAvailable) {
+      logger.info({ 
+        version: status.version, 
+        os: status.os,
+        wsl2: status.wsl2,
+        dockerDesktop: status.dockerDesktop 
+      }, 'Docker pronto');
+    } else {
+      logger.warn({ 
+        os: status.os,
+        error: status.error,
+        hint: status.os === 'windows' 
+          ? 'Instale Docker Desktop: https://www.docker.com/products/docker-desktop'
+          : 'Instale Docker: sudo apt-get install docker.io'
+      }, 'Docker não disponível');
     }
-    logger.info({ dockerAvailable: this._dockerAvailable }, 'Docker detectado');
+
     return this._dockerAvailable;
   }
 
   get dockerAvailable(): boolean | null {
     return this._dockerAvailable;
+  }
+
+  getDockerManager(): DockerManager {
+    return this.dockerManager;
   }
 
   private async ensureDir(): Promise<void> {
@@ -137,7 +172,11 @@ export class SandboxService {
 
   async execute(code: string, language: SandboxLanguage, sessionId?: string): Promise<SandboxResult> {
     const dockerOk = await this.detectDocker();
-    if (!dockerOk) throw new Error('Docker não disponível.');
+    if (!dockerOk) {
+      const env = this.dockerManager.getEnvironmentInfo();
+      throw new Error(`Docker não disponível no ${env.os}. ${env.dockerStatus?.error || ''}`);
+    }
+
     if (!this.config.allowedLanguages.includes(language)) {
       throw new Error(`Linguagem '${language}' não permitida.`);
     }
@@ -202,9 +241,9 @@ export class SandboxService {
     try {
       await execAsync(`docker kill ${container.name}`);
       await execAsync(`docker rm ${container.name}`);
-      logger.info({ container: container.name }, 'Container destruído por inatividade');
+      logger.info({ container: container.name }, 'Container destruído');
     } catch (err: any) {
-      logger.warn({ error: err.message, container: container.name }, 'Erro ao destruir container');
+      logger.warn({ error: err.message, container: container.name }, 'Erro ao destruir');
     }
     this.containers.delete(containerKey);
     this.cleanupTimers.delete(containerKey);
