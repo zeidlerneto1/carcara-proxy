@@ -296,6 +296,9 @@ export interface LlamaUIMigrationState {
 export type LoopPhase = 'plan' | 'execute' | 'evaluate' | 'adapt' | 'complete' | 'failed';
 
 export interface LoopConfig {
+  enableParallelExecution?: boolean;
+  enableEarlyExit?: boolean;
+  promptCacheKey?: string | null;
   maxIterations: number;
   convergenceThreshold: number;
   timeoutMs: number;
