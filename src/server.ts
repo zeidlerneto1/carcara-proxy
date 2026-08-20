@@ -1,10 +1,13 @@
-import 'dotenv/config';
-import { CarcaraRouter } from './api-router.js';
+import dotenv from 'dotenv';
+import { CarcaraRouter } from './presentation/api-router.js';
+
+dotenv.config();
 
 const PORT = parseInt(process.env.PORT || '3030', 10);
-const router = new CarcaraRouter(PORT);
 
-router.start().catch((err) => {
-  console.error('Failed to start server:', err);
-  process.exit(1);
-});
+async function main() {
+  const router = new CarcaraRouter(PORT);
+  await router.start();
+}
+
+main().catch(console.error);
