@@ -16,8 +16,8 @@ export interface ThinkingConfig {
   budgetTokens: number;
   reasoningControl: boolean;
   reasoningFormat: string;
-  sandboxEnabled: boolean;
-  sandboxTools: string[];
+  toolsEnabled: boolean;
+  enabledTools: string[];
 }
 
 

@@ -17,7 +17,7 @@ export class ThinkingService {
   private config: ThinkingConfig = {
     enabled: true, level: 'low', budgetTokens: 512,
     reasoningControl: true, reasoningFormat: 'auto',
-    sandboxEnabled: true, sandboxTools: ['web_search', 'get_time', 'calculate'],
+    toolsEnabled: true, enabledTools: ['web_search', 'get_time', 'calculate'],
   };
   private agentEngine: AgentEngine | null = null;
   private memoryService: MemoryService | null = null;
@@ -130,15 +130,15 @@ export class ThinkingService {
     return null;
   }
 
-  async executeSandbox(prompt: string, context?: string): Promise<string> {
+  async enrichPrompt(prompt: string, context?: string): Promise<string> {
     const agentResult = await this.detectAndRunAgent(prompt);
     if (agentResult !== null) return agentResult;
 
-    if (!this.config.sandboxEnabled || !this.config.enabled) return prompt;
+    if (!this.config.toolsEnabled || !this.config.enabled) return prompt;
 
     const enriched: string[] = [prompt];
 
-    if (this.config.sandboxTools.includes('web_search')) {
+    if (this.config.enabledTools.includes('web_search')) {
       try {
         const search = await this.searchService.duckDuckGo(prompt);
         if (search.results?.length) {
@@ -150,11 +150,11 @@ export class ThinkingService {
       } catch {}
     }
 
-    if (this.config.sandboxTools.includes('get_time')) {
+    if (this.config.enabledTools.includes('get_time')) {
       enriched.push(`\n[Data/Hora atual]: ${new Date().toISOString()}`);
     }
 
-    if (this.config.sandboxTools.includes('calculate')) {
+    if (this.config.enabledTools.includes('calculate')) {
       const mathExpr = this.extractMathExpression(prompt);
       if (mathExpr) {
         try {

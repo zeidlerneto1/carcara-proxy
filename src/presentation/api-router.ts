@@ -6,15 +6,13 @@ import rateLimit from 'express-rate-limit';
 import { CarcaraClient } from '../carcara-client.js';
 import { customMCPTools } from '../mcp-tools.js';
 import { SearchService } from '../infrastructure/services/search-service.js';
-import { SandboxService } from '../infrastructure/services/sandbox-service.js';
 import { LlamaUIConfigService, MCPServerConfig } from '../llama-ui-config.js';
 import { AgentEngine } from '../application/agents/agent-engine.js';
 import { MemoryService } from '../memory-service.js';
 import { MetricsService } from '../metrics-service.js';
 import { registerAllAgents } from '../agents/index.js';
 import { ChatUseCase } from '../application/use-cases/chat-use-case.js';
-import { ChatMessage, ToolCall, AgentTask, CodeTaskInput } from '../types.js';
-import { Readable } from 'stream';
+import { ChatMessage, ToolCall } from '../types.js';
 
 const limiter = rateLimit({
   windowMs: 1 * 60 * 1000, max: 120,
@@ -31,29 +29,21 @@ export class CarcaraRouter {
   private app: express.Application;
   private client: CarcaraClient;
   private searchService: SearchService;
-  private sandboxService: SandboxService;
   private agentEngine: AgentEngine;
   private memoryService: MemoryService;
   private metricsService: MetricsService;
   private reactAgent: any;
   private chatUseCase: ChatUseCase;
   private port: number;
-  private dockerAvailable: boolean = false;
 
   constructor(port: number = 3030) {
     this.port = port;
     this.client = new CarcaraClient({ domain: 'LNCC' });
     this.searchService = new SearchService();
-    this.sandboxService = new SandboxService();
     this.agentEngine = new AgentEngine();
     this.memoryService = new MemoryService();
     this.metricsService = new MetricsService();
-    this.chatUseCase = new ChatUseCase(
-      this.client as any,
-      this.sandboxService as any,
-      this.searchService as any,
-      false
-    );
+    this.chatUseCase = new ChatUseCase(this.client as any, this.searchService as any);
     this.app = express();
   }
 
@@ -71,25 +61,7 @@ export class CarcaraRouter {
     return String(content);
   }
 
-  private async detectEnvironment(): Promise<void> {
-    this.dockerAvailable = await this.sandboxService.detectDocker();
-    this.chatUseCase = new ChatUseCase(
-      this.client as any,
-      this.sandboxService as any,
-      this.searchService as any,
-      this.dockerAvailable
-    );
-    logger.info({ dockerAvailable: this.dockerAvailable }, 'Ambiente detectado');
-
-    this.reactAgent = registerAllAgents(this.agentEngine, this.client, this.memoryService, this.metricsService, this.dockerAvailable);
-    this.client.setAgentEngine(this.agentEngine);
-    this.client.setMemoryService(this.memoryService);
-    this.client.setMetricsService(this.metricsService);
-  }
-
   async start(): Promise<void> {
-    await this.detectEnvironment();
-
     this.app.use(helmet({ contentSecurityPolicy: false, crossOriginEmbedderPolicy: false }));
     this.app.use(cors());
     this.app.use(compression());
@@ -100,6 +72,11 @@ export class CarcaraRouter {
       console.log(`${new Date().toISOString()} ${req.method} ${req.url}`);
       next();
     });
+
+    this.reactAgent = registerAllAgents(this.agentEngine, this.client, this.memoryService, this.metricsService);
+    this.client.setAgentEngine(this.agentEngine);
+    this.client.setMemoryService(this.memoryService);
+    this.client.setMetricsService(this.metricsService);
 
     // ==========================================
     // ROTAS OPENAI-COMPATIBLE
@@ -147,7 +124,6 @@ export class CarcaraRouter {
         const completionId = `chatcmpl-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
         const created = Math.floor(Date.now() / 1000);
         const modelName = model || this.client.getDefaultModel();
-        const sessionId = `sess_${Date.now()}`;
 
         const lnccMessages: any[] = [];
         const systemMsg = msgs.find((m) => m.role === 'system');
@@ -179,7 +155,7 @@ export class CarcaraRouter {
         if (useNativeTools) {
           try {
             logger.info({ model: modelName }, 'Iniciando ToolCalling loop nativo');
-            const result = await this.chatUseCase.runToolLoop(lnccMessages, modelName, 15, sessionId);
+            const result = await this.chatUseCase.runToolLoop(lnccMessages, modelName, 15);
             return this._sendResponse(res, result.content, completionId, created, modelName, stream);
           } catch (toolErr: any) {
             logger.error({ error: toolErr.message }, 'Erro no ToolCalling, fallback normal');
@@ -227,7 +203,7 @@ export class CarcaraRouter {
     // ==========================================
 
     this.app.get('/api/health', (_req: Request, res: Response) => {
-      res.json({ status: 'ok', initialized: this.client.isReady, docker: this.dockerAvailable });
+      res.json({ status: 'ok', initialized: this.client.isReady });
     });
 
     this.app.get('/api/tags', async (_req: Request, res: Response) => {
@@ -358,68 +334,6 @@ export class CarcaraRouter {
     this.app.get('/ping', (_req: Request, res: Response) => res.json({ pong: true }));
 
     // ==========================================
-    // SANDBOX
-    // ==========================================
-
-    this.app.get('/api/sandbox/status', async (_req: Request, res: Response) => {
-      try {
-        res.json({
-          dockerAvailable: this.dockerAvailable,
-          dockerConfig: this.sandboxService.getConfig(),
-          mode: this.dockerAvailable ? 'docker-persistent' : 'unavailable',
-          containers: this.sandboxService.listContainers(),
-          agents: this.agentEngine.list().map(a => ({ id: a.id, name: a.name, capabilities: a.capabilities })),
-        });
-      } catch (error: any) { res.status(500).json({ error: error.message }); }
-    });
-
-    this.app.post('/api/sandbox/exec', async (req: Request, res: Response) => {
-      try {
-        const { code, language, timeout, memory, sessionId } = req.body;
-        if (!code) return res.status(400).json({ error: 'code is required' });
-        if (!language) return res.status(400).json({ error: 'language is required' });
-        if (!this.dockerAvailable) return res.status(503).json({ error: 'Docker não disponível.' });
-
-        const dockerLangs = ['python', 'javascript', 'typescript', 'bash', 'sh'];
-        if (!dockerLangs.includes(language)) return res.status(400).json({ error: `Linguagem deve ser: ${dockerLangs.join(', ')}` });
-
-        if (timeout) this.sandboxService.setConfig({ timeoutMs: timeout });
-        if (memory) this.sandboxService.setConfig({ memoryLimitMb: memory });
-
-        const result = await this.sandboxService.execute(code, language, sessionId);
-        res.json({ ...result, mode: 'docker-persistent', sessionId: sessionId || 'default' });
-      } catch (error: any) { res.status(500).json({ error: error.message }); }
-    });
-
-    this.app.post('/api/sandbox/config', async (req: Request, res: Response) => {
-      try {
-        const { timeoutMs, memoryLimitMb, cpuPercent, networkEnabled, allowedLanguages, sessionTimeoutMs } = req.body;
-        this.sandboxService.setConfig({
-          ...(timeoutMs !== undefined && { timeoutMs }),
-          ...(memoryLimitMb !== undefined && { memoryLimitMb }),
-          ...(cpuPercent !== undefined && { cpuPercent }),
-          ...(networkEnabled !== undefined && { networkEnabled }),
-          ...(allowedLanguages !== undefined && { allowedLanguages }),
-          ...(sessionTimeoutMs !== undefined && { sessionTimeoutMs }),
-        });
-        res.json({ success: true, dockerConfig: this.sandboxService.getConfig() });
-      } catch (error: any) { res.status(500).json({ error: error.message }); }
-    });
-
-    this.app.post('/api/sandbox/cleanup', async (req: Request, res: Response) => {
-      try {
-        const { sessionId } = req.body;
-        if (sessionId) {
-          await this.sandboxService.cleanupSession(sessionId);
-          res.json({ success: true, sessionId, message: 'Sessão limpa' });
-        } else {
-          await this.sandboxService.cleanupAll();
-          res.json({ success: true, message: 'Todos os containers destruídos' });
-        }
-      } catch (error: any) { res.status(500).json({ error: error.message }); }
-    });
-
-    // ==========================================
     // LLAMAUI CONFIG
     // ==========================================
 
@@ -500,21 +414,17 @@ export class CarcaraRouter {
       this.app.listen(this.port, () => {
         console.log('╔═══════════════════════════════════════════════════════════════╗');
         console.log('║      🤖 Carcara Proxy v3.1 - N-Layers                        ║');
-        console.log('║         Docker: ' + (this.dockerAvailable ? '✅' : '❌') + ' | Agents: ' + this.agentEngine.list().length + '         ║');
+        console.log('║         Docker: ❌ removido | Agents: ' + this.agentEngine.list().length + '         ║');
         console.log('╠═══════════════════════════════════════════════════════════════╣');
-        console.log(`║  🌐 http://localhost:${this.port}                           ║`);
+        console.log(`║  🌐 http://localhost:${this.port}                                    ║`);
         console.log('║  📋 OpenAI: /v1/models, /v1/chat/completions, /v1/embeddings  ║');
         console.log('║  📋 Ollama: /api/health, /api/tags, /api/chat, /api/generate  ║');
         console.log('║  🔧 MCP: /mcp/list, /mcp/call                                ║');
-        console.log('║  🐳 Sandbox: /api/sandbox/exec (Docker Persistente)            ║');
         console.log('║  🔍 Search: /api/search, /api/search/ddg, /api/search/wiki     ║');
         console.log('║  🤖 Agentes: detectados automaticamente no chat               ║');
         console.log('║  🧠 Memoria: .carcara/memory.jsonl                            ║');
         console.log('║  📊 Metricas: .carcara/metrics.jsonl                          ║');
         console.log('╚═══════════════════════════════════════════════════════════════╝');
-        console.log(`║  📁 Sessao: .carcara/session.json                              ║`);
-        console.log('╚═══════════════════════════════════════════════════════════════╝
-');
         resolve();
       });
     });
@@ -555,7 +465,6 @@ export class CarcaraRouter {
   }
 
   async stop(): Promise<void> {
-    await this.sandboxService.cleanupAll();
     await this.client.close();
     this.metricsService.stop();
   }

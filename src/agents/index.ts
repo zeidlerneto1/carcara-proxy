@@ -11,17 +11,16 @@ export function registerAllAgents(
   engine: AgentEngine,
   client: CarcaraClient,
   memory: MemoryService,
-  metrics: MetricsService,
-  dockerAvailable: boolean = false
+  metrics: MetricsService
 ): ReActLoopAgent {
-  // ===== REACT LOOP AGENT (novo — agente padrão inteligente) =====
-  const reactAgent = new ReActLoopAgent(client, dockerAvailable);
+  // ===== REACT LOOP AGENT =====
+  const reactAgent = new ReActLoopAgent(client);
   engine.register({
     id: 'react-loop',
     name: 'ReAct Loop Agent',
     description: 'Agente ReAct (Reasoning + Acting) com loop de ferramentas no chat principal',
     version: '2.0.0',
-    capabilities: ['reasoning', 'tool-use', 'web-search', 'code-execution', 'sandbox', 'mcp'],
+    capabilities: ['reasoning', 'tool-use', 'web-search', 'code-execution', 'mcp'],
   }, async (task) => {
     metrics.record('agent.run', 1, { agent: 'react-loop' });
     const result = await reactAgent.execute(task);
@@ -39,9 +38,9 @@ export function registerAllAgents(
   engine.register({
     id: 'code-loop',
     name: 'Code Loop Agent',
-    description: 'Gera codigo, testa no sandbox Docker, itera ate convergir',
+    description: 'Gera codigo e itera ate convergir',
     version: '1.0.0',
-    capabilities: ['code-generation', 'sandbox-execution', 'test-evaluation', 'auto-correction'],
+    capabilities: ['code-generation', 'test-evaluation', 'auto-correction'],
   }, async (task) => {
     metrics.record('agent.run', 1, { agent: 'code-loop' });
     const result = await codeAgent.execute(task);
@@ -87,6 +86,5 @@ export function registerAllAgents(
     return planner.execute(task);
   });
 
-  // Retorna o reactAgent para uso direto no api-router
   return reactAgent;
 }

@@ -669,7 +669,7 @@ export class CarcaraClient {
     await this.saveMessage(userMsg);
     if (parentId) await this.addChildToMessage(parentId, userMsgId);
 
-    const enrichedPrompt = await this.thinkingService.executeSandbox(prompt);
+    const enrichedPrompt = await this.thinkingService.enrichPrompt(prompt);
 
     const payload: any = {
       model: modelToUse, messages: [{ role: 'user', content: enrichedPrompt }],
@@ -812,7 +812,7 @@ export class CarcaraClient {
     await this.saveMessage(userMsg);
     if (parentId) await this.addChildToMessage(parentId, userMsgId);
 
-    const enrichedPrompt = await this.thinkingService.executeSandbox(prompt);
+    const enrichedPrompt = await this.thinkingService.enrichPrompt(prompt);
 
     const payload: any = {
       model: modelToUse, messages: [{ role: 'user', content: enrichedPrompt }],

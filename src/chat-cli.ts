@@ -28,7 +28,6 @@ function printBanner() {
   console.log('║    /quit  - Sair                         ║');
   console.log('║    /clear - Limpar histórico             ║');
   console.log('║    /model <nome> - Trocar modelo         ║');
-  console.log('║    /sandbox <lang> <código> - Executar   ║');
   console.log('║    /stream on|off - Toggle streaming     ║');
   console.log('╚══════════════════════════════════════════╝');
   console.log('');
@@ -96,18 +95,6 @@ async function chat(userInput: string): Promise<void> {
   }
 }
 
-async function executeSandbox(language: string, code: string): Promise<void> {
-  try {
-    const { data } = await axios.post(`${PROXY_URL}/api/sandbox/exec`, {
-      code,
-      language,
-    });
-    console.log('📤 stdout:', data.stdout || '(vazio)');
-    if (data.stderr) console.log('📤 stderr:', data.stderr);
-    console.log('⏱️  Duração:', data.durationMs + 'ms | Exit:', data.exitCode);
-  } catch (err: any) {
-    console.error('❌ Sandbox erro:', err.response?.data?.error || err.message);
-  }
 }
 
 async function main() {
@@ -153,16 +140,6 @@ async function main() {
         return ask();
       }
 
-      if (trimmed.startsWith('/sandbox ')) {
-        const rest = trimmed.slice(9).trim();
-        const spaceIdx = rest.indexOf(' ');
-        if (spaceIdx === -1) {
-          console.log('Uso: /sandbox <python|javascript|bash> <código>\n');
-          return ask();
-        }
-        const lang = rest.slice(0, spaceIdx);
-        const code = rest.slice(spaceIdx + 1);
-        await executeSandbox(lang, code);
         console.log('');
         return ask();
       }
