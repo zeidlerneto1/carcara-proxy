@@ -547,8 +547,7 @@ export class CarcaraRouter {
         console.log('║  📊 Metricas: .carcara/metrics.jsonl                          ║');
         console.log('╚═══════════════════════════════════════════════════════════════╝');
         console.log(`║  📁 Sessao: .carcara/session.json                              ║`);
-        console.log('╚═══════════════════════════════════════════════════════════════╝
-');
+        console.log('╚═══════════════════════════════════════════════════════════════╝');
         resolve();
       });
     });
