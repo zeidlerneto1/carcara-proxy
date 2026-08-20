@@ -5,6 +5,23 @@ export interface CarcaraConfig {
 }
 
 // ============================================================================
+// THINKING / REASONING
+// ============================================================================
+
+export type ThinkingLevel = 'off' | 'low' | 'medium' | 'high' | 'max';
+
+export interface ThinkingConfig {
+  enabled: boolean;
+  level: ThinkingLevel;
+  budgetTokens: number;
+  reasoningControl: boolean;
+  reasoningFormat: string;
+  sandboxEnabled: boolean;
+  sandboxTools: string[];
+}
+
+
+// ============================================================================
 // INDEXEDDB - Estrutura real do LlamaUI
 // ============================================================================
 
