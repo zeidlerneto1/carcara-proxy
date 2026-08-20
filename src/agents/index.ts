@@ -11,10 +11,11 @@ export function registerAllAgents(
   engine: AgentEngine,
   client: CarcaraClient,
   memory: MemoryService,
-  metrics: MetricsService
+  metrics: MetricsService,
+  dockerAvailable: boolean = false
 ): ReActLoopAgent {
   // ===== REACT LOOP AGENT (novo — agente padrão inteligente) =====
-  const reactAgent = new ReActLoopAgent(client);
+  const reactAgent = new ReActLoopAgent(client, dockerAvailable);
   engine.register({
     id: 'react-loop',
     name: 'ReAct Loop Agent',
