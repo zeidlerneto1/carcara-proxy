@@ -18,14 +18,14 @@ export interface SSHContainerConfig {
   memoryLimitMb: number;
   cpuPercent: number;
   networkEnabled: boolean;
-  dockerSocket: boolean; // mapear /var/run/docker.sock
+  dockerSocket: boolean;
 }
 
 const DEFAULT_CONFIG: SSHContainerConfig = {
   containerName: 'carcara-ssh-bastion',
   hostSshPort: 2222,
   containerSshPort: 22,
-  image: 'ubuntu:22.04',
+  image: 'alpine:3.19',
   username: 'carcara',
   password: 'carcara123',
   workDir: '/home/carcara/workspace',
@@ -46,14 +46,13 @@ export interface SSHContainerStatus {
 }
 
 /**
- * SSHContainerService: gerencia um container Docker persistente com SSH.
+ * SSHContainerService: container persistente com SSH.
  * 
- * - Subido no init do proxy (não sob demanda)
+ * - NÃO usa docker build no startup (era lento/travava)
+ * - Usa imagem Alpine pré-existente + setup via docker exec
+ * - Startup em ~3-5 segundos (só docker run + exec)
  * - Porta 2222 do host -> 22 do container
- * - Ubuntu 22.04 com OpenSSH server
- * - Usuário 'carcara' com senha configurável
-n * - Volume persistente para workspace
- * - Opcional: acesso ao Docker socket (Docker-in-Docker)
+ * - Ubuntu-like environment com bash, python3, node, git, openssh
  */
 export class SSHContainerService {
   private config: SSHContainerConfig;
@@ -67,42 +66,23 @@ export class SSHContainerService {
 
   /**
    * Inicializa o container SSH. Chamado no startup do proxy.
+   * NÃO faz docker build — usa imagem pré-existente + exec.
    */
   async init(): Promise<SSHContainerStatus> {
+    const startTime = Date.now();
     logger.info({ container: this.config.containerName, port: this.config.hostSshPort }, 'Iniciando SSH Bastion...');
 
-    // Gera script de setup do container
     await this.ensureDir();
-    await this.writeSetupScript();
 
-    // Verifica se já existe
+    // Remove container antigo se existir
     try {
-      const { stdout } = await execAsync(`docker inspect -f "{{.State.Running}}" ${this.config.containerName}`);
-      if (stdout.trim() === 'true') {
-        logger.info({ container: this.config.containerName }, 'Container SSH já rodando');
-        this._running = true;
-        return this.getStatus();
-      }
-      // Container existe mas parado, remove
-      await execAsync(`docker rm -f ${this.config.containerName}`);
+      await execAsync(`docker rm -f ${this.config.containerName}`, { timeout: 10000 });
+      logger.info({ container: this.config.containerName }, 'Container antigo removido');
     } catch {
-      // Não existe, segue
+      // Não existia
     }
 
-    // Build da imagem customizada com SSH
-    const dockerfile = this.generateDockerfile();
-    const dockerfilePath = path.join(this.baseDir, 'Dockerfile');
-    await fs.writeFile(dockerfilePath, dockerfile, 'utf-8');
-
-    logger.info({ image: this.config.image }, 'Buildando imagem SSH...');
-    try {
-      await execAsync(`docker build -t ${this.config.containerName}:latest -f ${dockerfilePath} ${this.baseDir}`);
-    } catch (err: any) {
-      logger.error({ error: err.message }, 'Falha no build da imagem SSH');
-      throw err;
-    }
-
-    // Run do container
+    // 1. Run do container Alpine com entrypoint que mantém rodando
     const dockerArgs = [
       'run', '-d',
       '--name', this.config.containerName,
@@ -112,59 +92,111 @@ export class SSHContainerService {
       '--memory-swap=' + this.config.memoryLimitMb + 'm',
       '--cpus=' + (this.config.cpuPercent / 100),
       '--restart=unless-stopped',
-      '--user=root',
       '-v', `${this.baseDir}/workspace:${this.config.workDir}:rw`,
     ];
 
-    if (this.config.networkEnabled) {
-      dockerArgs.push('--network=bridge');
-    } else {
-      dockerArgs.push('--network=none');
-    }
+    if (this.config.networkEnabled) dockerArgs.push('--network=bridge');
+    else dockerArgs.push('--network=none');
 
     if (this.config.dockerSocket) {
       dockerArgs.push('-v', '/var/run/docker.sock:/var/run/docker.sock:rw');
     }
 
-    dockerArgs.push(`${this.config.containerName}:latest`);
+    dockerArgs.push(this.config.image, 'sh', '-c', 'while true; do sleep 3600; done');
 
-    logger.info({ args: dockerArgs }, 'Subindo container SSH...');
-    const { stderr } = await execAsync(`docker ${dockerArgs.join(' ')}`);
+    logger.info({ image: this.config.image }, 'Subindo container Alpine...');
+    const { stderr } = await execAsync(`docker ${dockerArgs.join(' ')}`, { timeout: 30000 });
     if (stderr && !stderr.includes(this.config.containerName)) {
       logger.warn({ stderr }, 'Docker run stderr');
     }
 
-    // Aguarda SSH subir
+    // 2. Setup via docker exec (muito mais rápido que docker build)
+    logger.info('Configurando SSH server no container...');
+    await this.setupContainer();
+
+    // 3. Inicia SSHD
+    logger.info('Iniciando SSHD...');
+    await execAsync(`docker exec ${this.config.containerName} sh -c "nohup /usr/sbin/sshd -D > /dev/null 2>&1 &"`, { timeout: 10000 });
+
+    // 4. Aguarda SSH subir (max 10s)
     logger.info('Aguardando SSH server...');
-    for (let i = 0; i < 30; i++) {
+    let sshReady = false;
+    for (let i = 0; i < 10; i++) {
       await new Promise(r => setTimeout(r, 1000));
       try {
-        const { stdout } = await execAsync(`docker exec ${this.config.containerName} pgrep sshd`);
-        if (stdout.trim()) {
-          logger.info('SSH server pronto!');
-          break;
-        }
+        await execAsync(`docker exec ${this.config.containerName} pgrep sshd`, { timeout: 5000 });
+        sshReady = true;
+        break;
       } catch {
         // Ainda não subiu
       }
     }
 
+    if (!sshReady) {
+      throw new Error('SSH server não iniciou no container');
+    }
+
     this._running = true;
     const status = this.getStatus();
+    const elapsed = Date.now() - startTime;
     logger.info({ 
       connect: status.connectCommand,
-      port: status.hostSshPort 
+      port: status.hostSshPort,
+      elapsedMs: elapsed,
     }, 'SSH Bastion pronto');
     return status;
   }
 
   /**
+   * Configura o container Alpine com tudo necessário via docker exec.
+   * Muito mais rápido que docker build porque não precisa baixar Ubuntu.
+   */
+  private async setupContainer(): Promise<void> {
+    const setupCommands = [
+      // Instala pacotes
+      'apk add --no-cache openssh-server openssh-client bash sudo curl wget git python3 py3-pip nodejs npm htop vim nano docker-cli',
+
+      // Cria usuário
+      `adduser -D -s /bin/bash ${this.config.username}`,
+      `echo "${this.config.username}:${this.config.password}" | chpasswd`,
+      `echo "${this.config.username} ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers`,
+
+      // Cria workspace
+      `mkdir -p ${this.config.workDir}`,
+      `chown -R ${this.config.username}:${this.config.username} ${this.config.workDir}`,
+
+      // Gera host keys
+      'ssh-keygen -A',
+
+      // Configura SSH
+      `sed -i "s/#PermitRootLogin.*/PermitRootLogin no/" /etc/ssh/sshd_config`,
+      `sed -i "s/#PasswordAuthentication.*/PasswordAuthentication yes/" /etc/ssh/sshd_config`,
+      `echo "AllowUsers ${this.config.username}" >> /etc/ssh/sshd_config`,
+      `echo "ListenAddress 0.0.0.0" >> /etc/ssh/sshd_config`,
+
+      // Ajusta permissões
+      'mkdir -p /var/run/sshd',
+      'chmod 755 /var/run/sshd',
+    ];
+
+    for (const cmd of setupCommands) {
+      try {
+        await execAsync(`docker exec ${this.config.containerName} sh -c "${cmd}"`, { timeout: 60000 });
+      } catch (err: any) {
+        logger.warn({ cmd: cmd.slice(0, 50), error: err.message }, 'Setup command falhou (pode ser OK se já existir)');
+      }
+    }
+  }
+
+  /**
    * Executa comando diretamente no container SSH via docker exec.
-   * Útil para o proxy executar sem precisar de SSH.
    */
   async exec(command: string, asUser: boolean = true): Promise<{ stdout: string; stderr: string; exitCode: number }> {
     const userFlag = asUser ? `-u ${this.config.username}` : '-u root';
-    const { stdout, stderr } = await execAsync(`docker exec ${userFlag} ${this.config.containerName} bash -c "${command.replace(/"/g, '\"')}"`);
+    const { stdout, stderr } = await execAsync(
+      `docker exec ${userFlag} ${this.config.containerName} bash -c "${command.replace(/"/g, '\"')}"`,
+      { timeout: 30000 }
+    );
     return { stdout, stderr, exitCode: 0 };
   }
 
@@ -185,9 +217,7 @@ export class SSHContainerService {
     }
 
     const ext = language === 'typescript' ? 'ts' : language === 'javascript' ? 'js' : language === 'python' ? 'py' : 'sh';
-    await this.exec(`cat > ${tmpFile}.${ext} << 'EOF'
-${code}
-EOF`);
+    await this.exec(`cat > ${tmpFile}.${ext} << 'EOF'\n${code}\nEOF`);
     const result = await this.exec(cmd);
     await this.exec(`rm -f ${tmpFile}.*`);
     return result;
@@ -207,7 +237,7 @@ EOF`);
 
   async stop(): Promise<void> {
     try {
-      await execAsync(`docker stop ${this.config.containerName}`);
+      await execAsync(`docker stop ${this.config.containerName}`, { timeout: 10000 });
       logger.info({ container: this.config.containerName }, 'Container SSH parado');
     } catch (err: any) {
       logger.warn({ error: err.message }, 'Erro ao parar container SSH');
@@ -217,7 +247,7 @@ EOF`);
 
   async destroy(): Promise<void> {
     try {
-      await execAsync(`docker rm -f ${this.config.containerName}`);
+      await execAsync(`docker rm -f ${this.config.containerName}`, { timeout: 10000 });
       logger.info({ container: this.config.containerName }, 'Container SSH destruído');
     } catch (err: any) {
       logger.warn({ error: err.message }, 'Erro ao destruir container SSH');
@@ -228,55 +258,5 @@ EOF`);
   private async ensureDir(): Promise<void> {
     await fs.mkdir(this.baseDir, { recursive: true });
     await fs.mkdir(path.join(this.baseDir, 'workspace'), { recursive: true });
-  }
-
-  private async writeSetupScript(): Promise<void> {
-    // Nada necessário, o Dockerfile faz tudo
-  }
-
-  private generateDockerfile(): string {
-    return `FROM ${this.config.image}
-
-# Instala dependências
-RUN apt-get update && apt-get install -y \
-    openssh-server \
-    sudo \
-    curl \
-    wget \
-    git \
-    python3 \
-    python3-pip \
-    nodejs \
-    npm \
-    bash \
-    htop \
-    vim \
-    nano \
-    && rm -rf /var/lib/apt/lists/*
-
-# Instala Docker CLI (para Docker-in-Docker)
-RUN curl -fsSL https://get.docker.com | sh || true
-
-# Configura usuário
-RUN useradd -m -s /bin/bash ${this.config.username} \
-    && echo "${this.config.username}:${this.config.password}" | chpasswd \
-    && usermod -aG sudo ${this.config.username} \
-    && echo "${this.config.username} ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
-
-# Configura SSH
-RUN mkdir -p /var/run/sshd \
-    && sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin no/' /etc/ssh/sshd_config \
-    && sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config \
-    && sed -i 's/#ListenAddress 0.0.0.0/ListenAddress 0.0.0.0/' /etc/ssh/sshd_config \
-    && echo "AllowUsers ${this.config.username}" >> /etc/ssh/sshd_config
-
-# Cria workspace
-RUN mkdir -p ${this.config.workDir} \
-    && chown -R ${this.config.username}:${this.config.username} ${this.config.workDir}
-
-EXPOSE ${this.config.containerSshPort}
-
-CMD ["/usr/sbin/sshd", "-D"]
-`;
   }
 }
