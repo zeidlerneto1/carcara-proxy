@@ -11,6 +11,7 @@ import { LlamaUIConfigService, MCPServerConfig } from '../llama-ui-config.js';
 import { AgentEngine } from '../application/agents/agent-engine.js';
 import { MemoryService } from '../memory-service.js';
 import { MetricsService } from '../metrics-service.js';
+import { DockerManager } from '../infrastructure/services/docker-manager.js';
 import { registerAllAgents } from '../agents/index.js';
 import { ChatUseCase } from '../application/use-cases/chat-use-case.js';
 import { ChatMessage, ToolCall, AgentTask, CodeTaskInput } from '../types.js';
@@ -204,6 +205,28 @@ export class CarcaraRouter {
     // OLLAMA COMPATIBLE
     // ==========================================
 
+    this.app.get('/api/environment', (_req: Request, res: Response) => {
+      try {
+        const dockerManager = this.sandboxService.getDockerManager();
+        res.json({
+          os: dockerManager.getOS(),
+          isWindows: dockerManager.isWindows(),
+          isLinux: dockerManager.isLinux(),
+          environment: dockerManager.getEnvironmentInfo(),
+          docker: {
+            available: this.dockerAvailable,
+            manager: dockerManager.getOS(),
+          },
+          sandbox: {
+            mode: this.dockerAvailable ? 'docker-persistent' : 'unavailable',
+            containers: this.sandboxService.listContainers().length,
+            config: this.sandboxService.getConfig(),
+          },
+          agents: this.agentEngine.list().map(a => ({ id: a.id, name: a.name })),
+        });
+      } catch (error: any) { res.status(500).json({ error: error.message }); }
+    });
+
     this.app.get('/api/health', (_req: Request, res: Response) => {
       res.json({ status: 'ok', initialized: this.client.isReady, docker: this.dockerAvailable });
     });
@@ -339,6 +362,21 @@ export class CarcaraRouter {
     // SANDBOX
     // ==========================================
 
+    this.app.get('/api/sandbox/status', async (_req: Request, res: Response) => {
+      try {
+        const dockerManager = this.sandboxService.getDockerManager();
+        res.json({
+          dockerAvailable: this.dockerAvailable,
+          dockerConfig: this.sandboxService.getConfig(),
+          mode: this.dockerAvailable ? 'docker-persistent' : 'unavailable',
+          containers: this.sandboxService.listContainers(),
+          environment: dockerManager.getEnvironmentInfo(),
+          agents: this.agentEngine.list().map(a => ({ id: a.id, name: a.name, capabilities: a.capabilities })),
+        });
+      } catch (error: any) { res.status(500).json({ error: error.message }); }
+    });
+
+    // Redirecionamento para compatibilidade
     this.app.get('/api/sandbox/status', async (_req: Request, res: Response) => {
       try {
         res.json({
