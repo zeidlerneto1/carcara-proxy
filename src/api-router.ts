@@ -660,6 +660,42 @@ export class CarcaraRouter {
     });
   }
 
+  /**
+   * Heuristica para decidir se uma pergunta beneficia do loop ReAct
+   */
+  private shouldUseReAct(text: string): boolean {
+    const lower = text.toLowerCase().trim();
+
+    // Sempre usa ReAct para certos padroes
+    const reactPatterns = [
+      /\b(calcule|calculate|compute|quanto [ée])\b/i,
+      /\b(busque|search|pesquise|encontre|procure)\b/i,
+      /\b(compare|comparar|diferenca entre)\b/i,
+      /\b(analise|analyze|explique|explain|por que|why|how)\b/i,
+      /\b(codigo|code|script|programa|funcao)\b/i,
+      /\b(dados|data|estatistica|statistic|grafico|chart)\b/i,
+      /\b(202[0-9]|atual|current|hoje|today|agora|now)\b/i,
+      /\b(clima|weather|temperatura|temperature)\b/i,
+      /\b(populacao|population|gdp|economia|economy)\b/i,
+    ];
+
+    for (const p of reactPatterns) {
+      if (p.test(lower)) return true;
+    }
+
+    // Perguntas com multiplas partes (virgulas, "e", "depois")
+    if ((lower.match(/\b(e|depois|then|after|next)\b/g) || []).length >= 2) {
+      return true;
+    }
+
+    // Perguntas longas (>100 chars) provavelmente sao complexas
+    if (text.length > 100) {
+      return true;
+    }
+
+    return false;
+  }
+
   async stop(): Promise<void> {
     await this.client.close();
     this.metricsService.stop();
