@@ -4,8 +4,8 @@ import pino from 'pino';
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
 
 /**
- * Agente Front-End: leitura/escrita de componentes visuais e layouts.
- * Restrito ao diretório de interfaces.
+ * Agente Front-End: gera componentes via LLM.
+ * O SandboxOrchestrator gerencia onde os arquivos são escritos (workDir temporário).
  */
 export class FrontendAgent {
   private client: CarcaraClient;

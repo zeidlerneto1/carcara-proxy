@@ -97,7 +97,9 @@ export class SupervisorAgent {
     const prompt = `Voce e um Supervisor de engenharia de software. Decomponha a seguinte tarefa em passos sequenciais para um enxame de agentes (BACKEND, FRONTEND, QA).\n\nTarefa: ${query}\n\nResponda APENAS com uma lista numerada. Cada passo deve comecar com BACKEND:, FRONTEND: ou QA:. Inclua o caminho do arquivo. QA deve ser o ULTIMO passo.\nExemplo:\n1. BACKEND: Criar API endpoint em src/application/api.ts\n2. FRONTEND: Criar componente em src/components/Form.tsx\n3. QA: Executar testes`;
 
     const content = await this._safeChat(prompt);
-    const lines = content.split('\n').filter(l => /^\d+\./.test(l.trim()));
+    const lines = content.split('\n')
+      .filter(l => /^\d+\./.test(l.trim()))
+      .map(l => l.replace(/\*\*/g, '').replace(/\*/g, '').trim());
     logger.debug({ rawContent: content.substring(0, 500) }, 'Resposta bruta do LLM para plano');
     if (lines.length === 0) {
       logger.warn({ content: content.substring(0, 200) }, 'LLM nao retornou plano no formato esperado');
@@ -110,7 +112,9 @@ export class SupervisorAgent {
     const prompt = `O plano atual falhou nos passos: ${failedSteps.join(', ')}.\nPlano original: ${state.plan.join('\n')}\n\nCrie um plano de correção com no maximo 3 passos adicionais.`;
 
     const content = await this._safeChat(prompt);
-    const lines = content.split('\n').filter(l => /^\d+\./.test(l.trim()));
+    const lines = content.split('\n')
+      .filter(l => /^\d+\./.test(l.trim()))
+      .map(l => l.replace(/\*\*/g, '').replace(/\*/g, '').trim());
     return lines;
   }
 
@@ -129,7 +133,9 @@ export class SupervisorAgent {
     else if (upper.includes('TIPO') || upper.includes('TYPECHECK')) action = 'typecheck';
     else if (upper.includes('LER') || upper.includes('READ')) action = 'read';
 
-    const pathMatch = step.match(/(src\/[^\s]+|server\.[^\s]+|config\/[^\s]+)/);
+    // Extrai path do step, removendo markdown e pegando apenas o caminho valido
+    const sanitizedStep = step.replace(/\*\*/g, '').replace(/\*/g, '').replace(/`/g, '');
+    const pathMatch = sanitizedStep.match(/(src\/[\w\/\-.]+|server\.[\w.]+|config\/[\w\/\-.]+)/);
     let targetPath = pathMatch?.[0] || 'src/application/index.ts';
     // Evitar targetPath ser um diretorio (causa EISDIR)
     if (targetPath.endsWith('/')) {

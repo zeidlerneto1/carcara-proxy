@@ -4,7 +4,8 @@ import pino from 'pino';
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
 
 /**
- * Agente Back-End: leitura/escrita de lógica de negócio e configurações.
+ * Agente Back-End: gera código via LLM.
+ * O SandboxOrchestrator gerencia onde os arquivos são escritos (workDir temporário).
  * NÃO executa rotinas (sem runtime).
  */
 export class BackendAgent {

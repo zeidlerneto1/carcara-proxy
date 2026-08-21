@@ -1,5 +1,7 @@
 import { GVisorSandboxService, SandboxResult } from '../../infrastructure/services/gvisor-sandbox-service.js';
 import pino from 'pino';
+import path from 'path';
+import os from 'os';
 
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
 
@@ -24,9 +26,11 @@ export interface SwarmResult {
 export class SandboxOrchestrator {
   private sandbox: GVisorSandboxService;
   private allowedPaths: Record<string, RegExp[]>;
+  private workDir: string;
 
   constructor(sandbox: GVisorSandboxService) {
     this.sandbox = sandbox;
+    this.workDir = path.join(os.tmpdir(), 'carcara-swarm-' + Date.now().toString(36));
     this.allowedPaths = {
       backend: [/^src\/(application|domain|infrastructure)\//, /^server\./, /^config\//],
       frontend: [/^src\/(presentation|components|pages)\//, /^public\//, /^styles\//],
@@ -37,6 +41,12 @@ export class SandboxOrchestrator {
   async execute(task: SwarmTask): Promise<SwarmResult> {
     const start = Date.now();
     const errors: string[] = [];
+
+    // Sanitiza targetPath: remove caracteres invalidos
+    task.targetPath = task.targetPath
+      .replace(/[*`"'<>|\?\x00-\x1f]/g, '')
+      .replace(/\.\.+/, '.')
+      .trim();
 
     if (!this._checkPermission(task.agentType, task.targetPath)) {
       return {
@@ -103,7 +113,8 @@ export class SandboxOrchestrator {
 
   private async _readFile(filePath: string): Promise<string> {
     const { readFile } = await import('fs/promises');
-    const content = await readFile(filePath, 'utf-8');
+    const safePath = path.join(this.workDir, filePath.replace(/^\//, '').replace(/^\\/, ''));
+    const content = await readFile(safePath, 'utf-8');
     return Buffer.from(content).toString('base64');
   }
 
@@ -111,9 +122,11 @@ export class SandboxOrchestrator {
     const { writeFile, mkdir } = await import('fs/promises');
     const { dirname } = await import('path');
     const content = Buffer.from(base64Content, 'base64').toString('utf-8');
-    await mkdir(dirname(filePath), { recursive: true });
-    await writeFile(filePath, content, 'utf-8');
-    return `Arquivo escrito: ${filePath} (${content.length} bytes)`;
+    // Escreve no diretorio temporario de trabalho, nao no projeto
+    const safePath = path.join(this.workDir, filePath.replace(/^\//, '').replace(/^\\/, ''));
+    await mkdir(dirname(safePath), { recursive: true });
+    await writeFile(safePath, content, 'utf-8');
+    return `Arquivo escrito: ${safePath} (${content.length} bytes)`;
   }
 
   private async _runInSandbox(task: SwarmTask): Promise<string> {
@@ -137,13 +150,14 @@ export class SandboxOrchestrator {
   }
 
   private _buildSandboxCommand(task: SwarmTask): string {
+    const workDir = this.workDir.replace(/\\/g, '/');
     switch (task.action) {
       case 'compile':
-        return `cd /workspace && npm install -g pnpm && pnpm install && pnpm run build 2>&1`;
+        return `cd "${workDir}" && npm install -g pnpm && pnpm install && pnpm run build 2>&1`;
       case 'test':
-        return `cd /workspace && npm install -g pnpm && pnpm install && pnpm test 2>&1`;
+        return `cd "${workDir}" && npm install -g pnpm && pnpm install && pnpm test 2>&1`;
       case 'typecheck':
-        return `cd /workspace && npm install -g pnpm && pnpm install && pnpm exec tsc --noEmit 2>&1`;
+        return `cd "${workDir}" && npm install -g pnpm && pnpm install && pnpm exec tsc --noEmit 2>&1`;
       default:
         return 'echo "Acao nao suportada"';
     }
