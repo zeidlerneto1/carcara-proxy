@@ -106,7 +106,7 @@ export class CarcaraRouter {
     this.approvalService = new ApprovalService(false);
     this.agentQueue = new AgentQueueService(
       parseInt(process.env.MAX_CONCURRENCY || '3', 10),
-      process.env.SUPERVISOR_MODEL || 'Qwen3.6-35B',
+      process.env.SUPERVISOR_MODEL || 'Qwen3.6-35B-A3B',
       process.env.WORKER_MODEL || 'DeepSeek-v4-Flash-0731'
     );
     this.codeParser = new StreamingCodeParser();
@@ -288,7 +288,7 @@ export class CarcaraRouter {
         res.json({
           object: 'list',
           data: inputs.map((_: any, i: number) => ({ object: 'embedding', embedding: new Array(1536).fill(0), index: i })),
-          model: model || 'Qwen3.6-35B',
+          model: model || 'Qwen3.6-35B-A3B',
           usage: { prompt_tokens: 0, total_tokens: 0 },
         });
       } catch (error: any) { res.status(500).json({ error: error.message }); }
@@ -514,7 +514,7 @@ export class CarcaraRouter {
           id: `swarm_${Date.now()}`,
           agentId: 'supervisor-swarm',
           input: { description, language: 'typescript' },
-          config: { model: model || 'Qwen3.6-35B' },
+          config: { model: model || 'Qwen3.6-35B-A3B' },
         });
 
         res.json({

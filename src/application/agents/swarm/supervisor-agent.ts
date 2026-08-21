@@ -28,7 +28,7 @@ export class SupervisorAgent {
     this.orchestrator = new SandboxOrchestrator(sandbox);
     this.config = {
       maxIterations: 10,
-      supervisorModel: 'Qwen3.6-35B',
+      supervisorModel: 'Qwen3.6-35B-A3B',
       ...config,
     };
   }

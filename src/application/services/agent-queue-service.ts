@@ -37,7 +37,7 @@ export class AgentQueueService extends EventEmitter {
 
   constructor(
     maxConcurrency: number = 3,
-    supervisorModel: string = 'Qwen3.6-35B',
+    supervisorModel: string = 'Qwen3.6-35B-A3B',
     workerModel: string = 'DeepSeek-v4-Flash-0731'
   ) {
     super();

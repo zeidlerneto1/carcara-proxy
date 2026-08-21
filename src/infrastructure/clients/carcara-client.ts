@@ -31,7 +31,7 @@ const DB_STORE_CONVERSATIONS = 'conversations';
 const DB_STORE_MESSAGES = 'messages';
 
 const DEFAULT_DOMAIN = 'LNCC';
-const DEFAULT_MODEL = 'Qwen3.6-35B';
+const DEFAULT_MODEL = 'Qwen3.6-35B-A3B';
 const DEFAULT_TITLE = 'Nova Conversa LNCC';
 const DEFAULT_TEMPERATURE = 0.5;
 const DEFAULT_MAX_TOKENS = parseInt(process.env.MAX_OUTPUT_TOKENS || "4096", 10);
