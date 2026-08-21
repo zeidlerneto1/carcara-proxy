@@ -39,7 +39,7 @@ export class QAAgent {
       id: `qa_compile_${Date.now()}`,
       agentType: 'qa',
       action: 'compile',
-      targetPath: '.',
+      targetPath: 'package.json',
     };
 
     const result = await this.orchestrator.execute(task);
@@ -51,7 +51,7 @@ export class QAAgent {
       id: `qa_types_${Date.now()}`,
       agentType: 'qa',
       action: 'typecheck',
-      targetPath: '.',
+      targetPath: 'package.json',
     };
 
     const result = await this.orchestrator.execute(task);
