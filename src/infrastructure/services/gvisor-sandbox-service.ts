@@ -78,7 +78,7 @@ export class GVisorSandboxService {
     await fs.mkdir(this.sandboxDir, { recursive: true });
   }
 
-  async execute(code: string, language: SandboxLanguage, sessionId?: string, workspaceReadOnly: boolean = true): Promise<SandboxResult> {
+  async execute(code: string, language: SandboxLanguage, sessionId?: string, workspaceReadOnly: boolean = true, timeoutMs?: number): Promise<SandboxResult> {
     const runtimeOk = await this.detectRuntime();
     if (!runtimeOk) throw new Error(`${this.config.runtime} nao disponivel.`);
     if (!this.config.allowedLanguages.includes(language)) {
@@ -96,14 +96,14 @@ export class GVisorSandboxService {
     const containerName = `${this.config.containerPrefix}-${sid}-${language}`;
     const startTime = Date.now();
 
-    const result = await this.runContainer(containerName, image, workDir, cmd, workspaceReadOnly);
+    const result = await this.runContainer(containerName, image, workDir, cmd, workspaceReadOnly, timeoutMs);
     const durationMs = Date.now() - startTime;
 
     logger.info({ container: containerName, language, exitCode: result.exitCode, durationMs }, 'Execucao sandbox completa');
     return { ...result, durationMs, containerName };
   }
 
-  private async runContainer(name: string, image: string, workDir: string, cmd: string[], workspaceReadOnly: boolean = true): Promise<SandboxResult> {
+  private async runContainer(name: string, image: string, workDir: string, cmd: string[], workspaceReadOnly: boolean = true, timeoutMs?: number): Promise<SandboxResult> {
     const { runtime, memoryLimitMb, cpuPercent, networkEnabled, blockInternalNetwork } = this.config;
 
     const baseArgs: string[] = [];
@@ -125,7 +125,6 @@ export class GVisorSandboxService {
         '--cap-drop=ALL',
         '-v', `${workDir}:/sandbox:rw`,
         '-v', `${process.cwd()}:/workspace:${workspaceReadOnly ? 'ro' : 'rw'}`,
-        '-v', `${path.join(process.cwd(), 'node_modules')}:/workspace/node_modules:ro`,
         '-w', '/sandbox',
         '--name', name,
         image,
@@ -148,7 +147,6 @@ export class GVisorSandboxService {
         '--cap-drop=ALL',
         '-v', `${workDir}:/sandbox:rw,Z`,
         '-v', `${process.cwd()}:/workspace:${workspaceReadOnly ? 'ro' : 'rw'},Z`,
-        '-v', `${path.join(process.cwd(), 'node_modules')}:/workspace/node_modules:ro,Z`,
         '-w', '/sandbox',
         '--name', name,
         image,
@@ -171,7 +169,6 @@ export class GVisorSandboxService {
         '--cap-drop=ALL',
         '-v', `${workDir}:/sandbox:rw`,
         '-v', `${process.cwd()}:/workspace:${workspaceReadOnly ? 'ro' : 'rw'}`,
-        '-v', `${path.join(process.cwd(), 'node_modules')}:/workspace/node_modules:ro`,
         '-w', '/sandbox',
         '--name', name,
         image,
@@ -185,8 +182,9 @@ export class GVisorSandboxService {
 
   private execWithTimeout(command: string, args: string[]): Promise<SandboxResult> {
     return new Promise((resolve) => {
+      const effectiveTimeout = timeoutMs || this.config.timeoutMs;
       const child = spawn(command, args, {
-        timeout: this.config.timeoutMs,
+        timeout: effectiveTimeout,
         killSignal: 'SIGKILL',
       });
 

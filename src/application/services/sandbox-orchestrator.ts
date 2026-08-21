@@ -119,7 +119,7 @@ export class SandboxOrchestrator {
   private async _runInSandbox(task: SwarmTask): Promise<string> {
     const code = this._buildSandboxCommand(task);
     const lang = this._resolveLanguage(task);
-    const result = await this.sandbox.execute(code, lang as any, `swarm_${task.agentType}_${task.id}`, task.agentType !== 'qa');
+    const result = await this.sandbox.execute(code, lang as any, `swarm_${task.agentType}_${task.id}`, task.agentType !== 'qa', task.agentType === 'qa' ? 120000 : undefined);
 
     let output = '';
     if (result.stdout) output += result.stdout;
@@ -139,11 +139,11 @@ export class SandboxOrchestrator {
   private _buildSandboxCommand(task: SwarmTask): string {
     switch (task.action) {
       case 'compile':
-        return `cd /workspace && npm run build 2>&1`;
+        return `cd /workspace && npm install -g pnpm && pnpm install && pnpm run build 2>&1`;
       case 'test':
-        return `cd /workspace && npm test 2>&1`;
+        return `cd /workspace && npm install -g pnpm && pnpm install && pnpm test 2>&1`;
       case 'typecheck':
-        return `cd /workspace && npx tsc --noEmit 2>&1`;
+        return `cd /workspace && npm install -g pnpm && pnpm install && pnpm exec tsc --noEmit 2>&1`;
       default:
         return 'echo "Acao nao suportada"';
     }
