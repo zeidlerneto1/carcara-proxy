@@ -1,7 +1,7 @@
 import { AgentEngine } from '../application/agents/agent-engine.js';
-import { CarcaraClient } from '../carcara-client.js';
-import { MemoryService } from '../memory-service.js';
-import { MetricsService } from '../metrics-service.js';
+import { CarcaraClient } from '../../infrastructure/clients/carcara-client.js';
+import { MemoryService } from '../../infrastructure/services/memory-service.js';
+import { MetricsService } from '../../infrastructure/services/metrics-service.js';
 import { ApprovalService } from '../application/services/approval-service.js';
 import { SupervisorAgent } from '../application/agents/swarm/supervisor-agent.js';
 
