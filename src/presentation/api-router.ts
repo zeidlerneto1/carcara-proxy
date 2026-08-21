@@ -620,7 +620,13 @@ export class CarcaraRouter {
     // ===== LLAMAUI CONFIG =====
 
     this.app.get('/api/config', async (_req: Request, res: Response) => {
-      try { const config = await this.client.llamaUI.getConfig(); res.json({ config }); }
+      try {
+        let config = await this.client.llamaUI?.getConfig?.();
+        if (!config) {
+          config = { models: [], systemMessage: '', mcpServers: [], theme: 'dark', thinking: { enabled: true, level: 'low' } };
+        }
+        res.json({ config });
+      }
       catch (error: any) { res.status(500).json({ error: error.message }); }
     });
 

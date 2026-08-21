@@ -130,7 +130,7 @@ export class GVisorSandboxService {
         image,
         ...cmd
       );
-      return this.execWithTimeout('docker', baseArgs);
+      return this.execWithTimeout('docker', baseArgs, timeoutMs);
     }
 
     if (runtime === 'podman') {
@@ -152,7 +152,7 @@ export class GVisorSandboxService {
         image,
         ...cmd
       );
-      return this.execWithTimeout('podman', baseArgs);
+      return this.execWithTimeout('podman', baseArgs, timeoutMs);
     }
 
     if (runtime === 'gvisor') {
@@ -174,13 +174,13 @@ export class GVisorSandboxService {
         image,
         ...cmd
       );
-      return this.execWithTimeout('docker', baseArgs);
+      return this.execWithTimeout('docker', baseArgs, timeoutMs);
     }
 
     throw new Error(`Runtime nao suportado: ${runtime}`);
   }
 
-  private execWithTimeout(command: string, args: string[]): Promise<SandboxResult> {
+  private execWithTimeout(command: string, args: string[], timeoutMs?: number): Promise<SandboxResult> {
     return new Promise((resolve) => {
       const effectiveTimeout = timeoutMs || this.config.timeoutMs;
       const child = spawn(command, args, {
