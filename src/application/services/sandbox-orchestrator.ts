@@ -139,11 +139,11 @@ export class SandboxOrchestrator {
   private _buildSandboxCommand(task: SwarmTask): string {
     switch (task.action) {
       case 'compile':
-        return `cd /workspace && npm install && npm run build 2>&1`;
+        return `cd /workspace && npm run build 2>&1`;
       case 'test':
-        return `cd /workspace && npm install && npm test 2>&1`;
+        return `cd /workspace && npm test 2>&1`;
       case 'typecheck':
-        return `cd /workspace && npm install && npx --yes tsc --noEmit 2>&1`;
+        return `cd /workspace && npx tsc --noEmit 2>&1`;
       default:
         return 'echo "Acao nao suportada"';
     }

@@ -767,8 +767,11 @@ export class CarcaraClient {
         : `Continue exactly from where you stopped. Do not repeat what was already said.\n\nPrevious output:\n${fullContent.slice(-3000)}`;
 
       const response = await this.chatCompletion(currentPrompt, model, tools);
-      const choice = response.choices[0];
-      const content = choice.message.content || '';
+      const choice = response.choices?.[0];
+      if (!choice) {
+        throw new Error('Resposta invalida da API em chatCompletionWithContinue');
+      }
+      const content = choice.message?.content || '';
       fullContent += content;
       lastCompletionId = response.id;
       lastTimings = response.timings;
@@ -829,15 +832,18 @@ export class CarcaraClient {
       baseURL: this.config.apiBaseUrl, timeout: TIMEOUT_CHAT,
     });
 
-    const choice = response.data.choices[0];
+    const choice = response.data?.choices?.[0];
+    if (!choice) {
+      throw new Error(`Resposta invalida da API: ${JSON.stringify(response.data)?.slice(0, 200)}`);
+    }
     const assistantMsgId = crypto.randomUUID ? crypto.randomUUID() : `msg_${Date.now()}`;
     const assistantMsg: LlamaMessage = {
       id: assistantMsgId, convId, role: 'assistant', type: 'text',
-      content: choice.message.content || '', parent: userMsgId, children: [],
+      content: choice.message?.content || '', parent: userMsgId, children: [],
       timestamp: Date.now(), model: modelToUse,
-      completionId: response.data.id || '',
-      timings: choice.timings || response.data.timings,
-      toolCalls: choice.message.tool_calls ? JSON.stringify(choice.message.tool_calls) : '',
+      completionId: response.data?.id || '',
+      timings: choice.timings || response.data?.timings,
+      toolCalls: choice.message?.tool_calls ? JSON.stringify(choice.message.tool_calls) : '',
     };
     await this.saveMessage(assistantMsg);
     await this.addChildToMessage(userMsgId, assistantMsgId);
@@ -907,7 +913,10 @@ export class CarcaraClient {
       timeout: TIMEOUT_CHAT,
     });
 
-    const choice = response.data.choices[0];
+    const choice = response.data?.choices?.[0];
+    if (!choice) {
+      throw new Error(`Resposta invalida da API: ${JSON.stringify(response.data)?.slice(0, 200)}`);
+    }
 
     // Persiste no IndexedDB (melhor esforço)
     try {
