@@ -1,7 +1,7 @@
 import { EventEmitter } from 'events';
 import pino from 'pino';
-import { LoopEngineering, PlanFn, ExecuteFn, EvaluateFn, AdaptFn } from '../../loop-engineering.js';
-import { AgentDefinition, AgentTask, AgentTaskResult, LoopResult, LoopConfig } from '../../types.js';
+import { LoopEngineering, PlanFn, ExecuteFn, EvaluateFn, AdaptFn } from '../services/loop-engineering.js';
+import { AgentDefinition, AgentTask, AgentTaskResult, LoopResult, LoopConfig } from '../../domain/types.js';
 
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
 

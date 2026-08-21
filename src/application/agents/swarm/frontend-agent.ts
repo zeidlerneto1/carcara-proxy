@@ -1,4 +1,4 @@
-import { CarcaraClient } from '../../carcara-client.js';
+import { CarcaraClient } from '../../../infrastructure/clients/carcara-client.js';
 import pino from 'pino';
 
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });

@@ -1,4 +1,4 @@
-import { CarcaraClient } from '../../carcara-client.js';
+import { CarcaraClient } from '../../../infrastructure/clients/carcara-client.js';
 import { SandboxOrchestrator, SwarmTask, SwarmResult } from '../../services/sandbox-orchestrator.js';
 import { GVisorSandboxService } from '../../../infrastructure/services/gvisor-sandbox-service.js';
 import pino from 'pino';
