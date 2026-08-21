@@ -5,10 +5,10 @@ import * as path from 'path';
 import pino from 'pino';
 import { Readable } from 'stream';
 import { LlamaUIConfigService } from '../config/llama-ui-config.js';
-import { ThinkingService, ThinkingConfig } from '../services/thinking-service.js';
-import { AgentEngine } from './agent-engine.js';
-import { MemoryService } from './memory-service.js';
-import { MetricsService } from './metrics-service.js';
+import { ThinkingService, ThinkingConfig } from '../../application/services/thinking-service.js';
+import { AgentEngine } from '../../application/agents/agent-engine.js';
+import { MemoryService } from '../services/memory-service.js';
+import { MetricsService } from '../services/metrics-service.js';
 import {
   CarcaraConfig, LlamaMessage, ConversationNode, ChatCompletionResponse,
   MCPListResponse, LoginPayload, ModelInfo, LoginScript, LoginStep, StoredSession

@@ -4,14 +4,14 @@ import compression from 'compression';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import { Server } from 'http';
-import { CarcaraClient } from '../../infrastructure/clients/carcara-client.js';
-import { customMCPTools } from '../../infrastructure/tools/mcp-tools.js';
+import { CarcaraClient } from '../infrastructure/clients/carcara-client.js';
+import { customMCPTools } from '../infrastructure/tools/mcp-tools.js';
 import { SearchService } from '../infrastructure/services/search-service.js';
 import { GVisorSandboxService } from '../infrastructure/services/gvisor-sandbox-service.js';
-import { LlamaUIConfigService, MCPServerConfig } from '../../infrastructure/config/llama-ui-config.js';
+import { LlamaUIConfigService, MCPServerConfig } from '../infrastructure/config/llama-ui-config.js';
 import { AgentEngine } from '../application/agents/agent-engine.js';
-import { MemoryService } from '../../infrastructure/services/memory-service.js';
-import { MetricsService } from '../../infrastructure/services/metrics-service.js';
+import { MemoryService } from '../infrastructure/services/memory-service.js';
+import { MetricsService } from '../infrastructure/services/metrics-service.js';
 import { registerAllAgents } from '../agents/index.js';
 import { ChatUseCase } from '../application/use-cases/chat-use-case.js';
 import { ApprovalService } from '../application/services/approval-service.js';
@@ -19,7 +19,7 @@ import { AgentQueueService } from '../application/services/agent-queue-service.j
 import { StreamingCodeParser } from '../infrastructure/parsers/streaming-code-parser.js';
 import { SandboxWebSocketServer } from './websocket-server.js';
 import readline from 'readline';
-import { ChatMessage, ToolCall } from '../../domain/types.js';
+import { ChatMessage, ToolCall } from '../domain/types.js';
 
 const limiter = rateLimit({
   windowMs: 1 * 60 * 1000, max: 120,

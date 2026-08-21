@@ -1,7 +1,7 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import pino from 'pino';
-import { MemoryEntry } from './types.js';
+import { MemoryEntry } from '../../domain/types.js';
 
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
 

@@ -1,9 +1,9 @@
-import { SearchService } from './search-service.js';
-import { AgentEngine } from './agent-engine.js';
-import { MemoryService } from './memory-service.js';
-import { MetricsService } from './metrics-service.js';
-import { CarcaraClient } from './carcara-client.js';
-import { ThinkingConfig, ThinkingLevel, CodeTaskInput } from './types.js';
+import { SearchService } from '../../infrastructure/services/search-service.js';
+import { AgentEngine } from '../agents/agent-engine.js';
+import { MemoryService } from '../../infrastructure/services/memory-service.js';
+import { MetricsService } from '../../infrastructure/services/metrics-service.js';
+import { CarcaraClient } from '../../infrastructure/clients/carcara-client.js';
+import { ThinkingConfig, ThinkingLevel, CodeTaskInput } from '../../domain/types.js';
 import pino from 'pino';
 
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
