@@ -7,6 +7,7 @@ import { CodeLoopAgent } from './code-loop-agent.js';
 import { PromptEngineerAgent } from './prompt-engineer-agent.js';
 import { TaskPlannerAgent } from './task-planner-agent.js';
 import { ReActLoopAgent } from './react-loop-agent.js';
+import { SupervisorAgent } from '../application/agents/swarm/supervisor-agent.js';
 
 export function registerAllAgents(
   engine: AgentEngine,
@@ -14,7 +15,8 @@ export function registerAllAgents(
   memory: MemoryService,
   metrics: MetricsService,
   allowHostExecution: boolean = false,
-  approvalService?: ApprovalService
+  approvalService?: ApprovalService,
+  sandbox?: any
 ): ReActLoopAgent {
   const reactAgent = new ReActLoopAgent(client, allowHostExecution, approvalService);
   engine.register({
@@ -84,6 +86,28 @@ export function registerAllAgents(
     metrics.record('agent.run', 1, { agent: 'task-planner' });
     return planner.execute(task);
   });
+
+  // ===== SUPERVISOR SWARM =====
+  if (sandbox) {
+    const supervisor = new SupervisorAgent(client, sandbox);
+    engine.register({
+      id: 'supervisor-swarm',
+      name: 'Supervisor Swarm',
+      description: 'Orquestrador de enxame de agentes (backend, frontend, qa)',
+      version: '1.0.0',
+      capabilities: ['planning', 'delegation', 'synthesis', 'swarm-orchestration'],
+    }, async (task) => {
+      metrics.record('agent.run', 1, { agent: 'supervisor-swarm' });
+      const result = await supervisor.execute(task);
+      await memory.add({
+        type: 'swarm',
+        content: JSON.stringify({ plan: result.plan, finalAnswer: result.finalAnswer }),
+        metadata: { taskId: task.id, steps: result.plan.length },
+        tags: ['supervisor-swarm', 'planning', `steps-${result.plan.length}`],
+      });
+      return result;
+    });
+  }
 
   return reactAgent;
 }

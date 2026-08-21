@@ -162,7 +162,7 @@ export class CarcaraRouter {
 
     this.reactAgent = registerAllAgents(
       this.agentEngine, this.client, this.memoryService, this.metricsService,
-      this.allowHostExecution, this.approvalService
+      this.allowHostExecution, this.approvalService, this.sandboxService
     );
     this.client.setAgentEngine(this.agentEngine);
     this.client.setMemoryService(this.memoryService);
@@ -503,6 +503,82 @@ export class CarcaraRouter {
       res.json({ success: true });
     });
 
+    // ===== SWARM / ENXAME =====
+
+    this.app.post('/api/swarm/execute', strictLimiter, async (req: Request, res: Response) => {
+      try {
+        const { description, model } = req.body;
+        if (!description) return res.status(400).json({ error: 'description is required' });
+
+        const result = await this.agentEngine.run({
+          id: `swarm_${Date.now()}`,
+          agentId: 'supervisor-swarm',
+          input: { description, language: 'typescript' },
+          config: { model: model || this.config.supervisorModel },
+        });
+
+        res.json({
+          success: true,
+          plan: result.output?.plan || [],
+          results: result.output?.results || [],
+          finalAnswer: result.output?.finalAnswer || '',
+        });
+      } catch (error: any) {
+        res.status(500).json({ error: error.message });
+      }
+    });
+
+    this.app.post('/api/swarm/backend', strictLimiter, async (req: Request, res: Response) => {
+      try {
+        const { description, targetPath, language } = req.body;
+        const { BackendAgent } = await import('../application/agents/swarm/backend-agent.js');
+        const agent = new BackendAgent(this.client);
+        const code = await agent.generateCode(description, targetPath || 'src/application/generated.ts', language || 'typescript');
+        res.json({ success: true, code, targetPath: targetPath || 'src/application/generated.ts' });
+      } catch (error: any) {
+        res.status(500).json({ error: error.message });
+      }
+    });
+
+    this.app.post('/api/swarm/frontend', strictLimiter, async (req: Request, res: Response) => {
+      try {
+        const { description, componentName, framework } = req.body;
+        const { FrontendAgent } = await import('../application/agents/swarm/frontend-agent.js');
+        const agent = new FrontendAgent(this.client);
+        const code = await agent.generateComponent(description, componentName || 'GeneratedComponent', framework || 'react');
+        res.json({ success: true, code, componentName: componentName || 'GeneratedComponent' });
+      } catch (error: any) {
+        res.status(500).json({ error: error.message });
+      }
+    });
+
+    this.app.post('/api/swarm/qa', strictLimiter, async (req: Request, res: Response) => {
+      try {
+        const { action, testPath } = req.body;
+        const { QAAgent } = await import('../application/agents/swarm/qa-agent.js');
+        const agent = new QAAgent(this.client, this.sandboxService);
+
+        let result: any;
+        switch (action) {
+          case 'test':
+            result = await agent.runTests(testPath);
+            break;
+          case 'compile':
+            result = await agent.compile();
+            break;
+          case 'typecheck':
+            result = await agent.typecheck();
+            break;
+          default:
+            return res.status(400).json({ error: 'action must be test, compile, or typecheck' });
+        }
+
+        res.json({ success: true, action, ...result });
+      } catch (error: any) {
+        res.status(500).json({ error: error.message });
+      }
+    });
+
     // ===== APPROVAL =====
 
     this.app.get('/api/approval/pending', (_req: Request, res: Response) => {
@@ -633,7 +709,7 @@ export class CarcaraRouter {
         console.log('║  📊 Queue: /api/queue/stats, /api/queue/pending                ║');
         console.log('║  ✅ Approval: /api/approval/pending, /api/approval/respond     ║');
         console.log('║  🔌 WebSocket: ws://localhost:3030/ws/sandbox (Xterm.js)      ║');
-        console.log('║  🤖 Agentes: ReAct com execucao sandbox gVisor                ║');
+        console.log('║  🤖 Agentes: ReAct + Enxame (backend/frontend/qa)            ║');
         console.log('║  🧠 Memoria: .carcara/memory.jsonl                            ║');
         console.log('║  📊 Metricas: .carcara/metrics.jsonl                          ║');
         console.log('╚═══════════════════════════════════════════════════════════════╝');
