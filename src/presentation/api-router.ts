@@ -709,7 +709,7 @@ export class CarcaraRouter {
         console.log('║  📊 Queue: /api/queue/stats, /api/queue/pending                ║');
         console.log('║  ✅ Approval: /api/approval/pending, /api/approval/respond     ║');
         console.log('║  🔌 WebSocket: ws://localhost:3030/ws/sandbox (Xterm.js)      ║');
-        console.log('║  🤖 Agentes: ReAct + Enxame (backend/frontend/qa)            ║');
+        console.log('║  🤖 Agentes: Enxame (backend/frontend/qa)                    ║');
         console.log('║  🧠 Memoria: .carcara/memory.jsonl                            ║');
         console.log('║  📊 Metricas: .carcara/metrics.jsonl                          ║');
         console.log('╚═══════════════════════════════════════════════════════════════╝');
