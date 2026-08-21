@@ -93,7 +93,7 @@ export class GVisorSandboxService {
     const filePath = path.join(workDir, fileName);
     await fs.writeFile(filePath, code, 'utf-8');
 
-    const containerName = `${this.config.containerPrefix}-${sid}-${language}`;
+    const containerName = `carcara-sandbox-${sid}-${language}`;
     const startTime = Date.now();
 
     const result = await this.runContainer(containerName, image, workDir, cmd, workspaceReadOnly, timeoutMs);
