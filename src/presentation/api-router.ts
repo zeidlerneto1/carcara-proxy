@@ -514,7 +514,7 @@ export class CarcaraRouter {
           id: `swarm_${Date.now()}`,
           agentId: 'supervisor-swarm',
           input: { description, language: 'typescript' },
-          config: { model: model || this.config.supervisorModel },
+          config: { model: model || 'Qwen3.6-35B' },
         });
 
         res.json({
