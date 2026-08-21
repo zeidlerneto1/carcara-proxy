@@ -2,6 +2,7 @@ import { AgentEngine } from '../agent-engine.js';
 import { CarcaraClient } from '../carcara-client.js';
 import { MemoryService } from '../memory-service.js';
 import { MetricsService } from '../metrics-service.js';
+import { ApprovalService } from '../application/services/approval-service.js';
 import { CodeLoopAgent } from './code-loop-agent.js';
 import { PromptEngineerAgent } from './prompt-engineer-agent.js';
 import { TaskPlannerAgent } from './task-planner-agent.js';
@@ -11,15 +12,16 @@ export function registerAllAgents(
   engine: AgentEngine,
   client: CarcaraClient,
   memory: MemoryService,
-  metrics: MetricsService
+  metrics: MetricsService,
+  allowHostExecution: boolean = false,
+  approvalService?: ApprovalService
 ): ReActLoopAgent {
-  // ===== REACT LOOP AGENT =====
-  const reactAgent = new ReActLoopAgent(client);
+  const reactAgent = new ReActLoopAgent(client, allowHostExecution, approvalService);
   engine.register({
     id: 'react-loop',
     name: 'ReAct Loop Agent',
-    description: 'Agente ReAct (Reasoning + Acting) com loop de ferramentas no chat principal',
-    version: '2.0.0',
+    description: 'Agente ReAct (Reasoning + Acting) com execucao de codigo no host',
+    version: '2.1.0',
     capabilities: ['reasoning', 'tool-use', 'web-search', 'code-execution', 'mcp'],
   }, async (task) => {
     metrics.record('agent.run', 1, { agent: 'react-loop' });
@@ -33,7 +35,6 @@ export function registerAllAgents(
     return result;
   });
 
-  // ===== CODE LOOP AGENT =====
   const codeAgent = new CodeLoopAgent(client);
   engine.register({
     id: 'code-loop',
@@ -53,7 +54,6 @@ export function registerAllAgents(
     return result;
   });
 
-  // ===== PROMPT ENGINEER AGENT =====
   const promptAgent = new PromptEngineerAgent(client);
   engine.register({
     id: 'prompt-engineer',
@@ -73,7 +73,6 @@ export function registerAllAgents(
     return result;
   });
 
-  // ===== TASK PLANNER AGENT =====
   const planner = new TaskPlannerAgent(client);
   engine.register({
     id: 'task-planner',

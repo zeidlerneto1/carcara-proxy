@@ -1,4 +1,6 @@
 import { CarcaraClient } from '../carcara-client.js';
+import { SafeCodeExecutor } from '../infrastructure/execution/safe-code-executor.js';
+import { ApprovalService } from '../application/services/approval-service.js';
 import pino from 'pino';
 
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
@@ -21,10 +23,20 @@ interface ReActResult {
 
 export class ReActLoopAgent {
   private client: CarcaraClient;
+  private executor: SafeCodeExecutor;
+  private approvalService: ApprovalService;
   private maxSteps: number = 10;
+  private allowHostExecution: boolean;
 
-  constructor(client: CarcaraClient) {
+  constructor(
+    client: CarcaraClient,
+    allowHostExecution: boolean = false,
+    approvalService?: ApprovalService
+  ) {
     this.client = client;
+    this.allowHostExecution = allowHostExecution;
+    this.executor = new SafeCodeExecutor({ timeoutMs: 15000 });
+    this.approvalService = approvalService || new ApprovalService(false);
   }
 
   async execute(task: any): Promise<ReActResult> {
@@ -62,7 +74,7 @@ export class ReActLoopAgent {
     for (const s of steps) {
       prompt += `Passo ${s.step}:\nPensamento: ${s.thought}\nAcao: ${s.action}\nEntrada: ${s.actionInput}\nObservacao: ${s.observation}\n\n`;
     }
-    prompt += `Pense no proximo passo. Use [Pensamento: ...] [Acao: ...] [Entrada: ...]. Use Acao: finish quando tiver a resposta.`;
+    prompt += `Pense no proximo passo. Use [Pensamento: ...] [Acao: ...] [Entrada: ...]. Use Acao: finish quando tiver a resposta.\nAcoes disponiveis: search, calculate, execute_js, execute_python, finish.`;
     return prompt;
   }
 
@@ -87,8 +99,44 @@ export class ReActLoopAgent {
         return `Resultado da busca por: ${input}`;
       case 'calculate':
         try { return String(eval(input)); } catch (e: any) { return `Erro: ${e.message}`; }
+      case 'execute_js':
+        return this._executeCode(input, 'javascript');
+      case 'execute_python':
+        return this._executeCode(input, 'python');
       default:
-        return `Acao ${action} nao disponivel (Docker removido).`;
+        return `Acao ${action} nao reconhecida.`;
     }
+  }
+
+  private async _executeCode(code: string, language: 'javascript' | 'python'): Promise<string> {
+    if (!this.allowHostExecution) {
+      return 'ERRO: Execucao de codigo no host desabilitada. Defina ALLOW_HOST_EXECUTION=true para ativar.';
+    }
+
+    const riskLevel = this._assessRisk(code);
+    const approved = await this.approvalService.requestApproval(
+      `execute_${language}`,
+      code,
+      riskLevel
+    );
+
+    if (!approved) {
+      return 'ERRO: Execucao negada pelo usuario (Human-in-the-Loop).';
+    }
+
+    const result = await this.executor.execute(code, language);
+    let out = '';
+    if (result.stdout) out += `stdout:\n${result.stdout}\n`;
+    if (result.stderr) out += `stderr:\n${result.stderr}\n`;
+    out += `exitCode: ${result.exitCode} | duration: ${result.durationMs}ms`;
+    return out.slice(0, 4000);
+  }
+
+  private _assessRisk(code: string): 'low' | 'medium' | 'high' {
+    const dangerous = ['rm ', 'del ', 'format', 'mkfs', 'dd ', 'shutdown', 'reboot', '>:', 'curl', 'wget', 'fetch'];
+    const lower = code.toLowerCase();
+    if (dangerous.some(d => lower.includes(d))) return 'high';
+    if (lower.includes('require(') || lower.includes('import ') || lower.includes('fs.')) return 'medium';
+    return 'low';
   }
 }

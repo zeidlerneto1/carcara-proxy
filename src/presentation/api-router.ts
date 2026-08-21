@@ -12,6 +12,8 @@ import { MemoryService } from '../memory-service.js';
 import { MetricsService } from '../metrics-service.js';
 import { registerAllAgents } from '../agents/index.js';
 import { ChatUseCase } from '../application/use-cases/chat-use-case.js';
+import { ApprovalService } from '../application/services/approval-service.js';
+import { StreamingCodeParser } from '../infrastructure/parsers/streaming-code-parser.js';
 import { ChatMessage, ToolCall } from '../types.js';
 
 const limiter = rateLimit({
@@ -25,6 +27,37 @@ const strictLimiter = rateLimit({
   message: { error: 'Rate limit exceeded for chat endpoint' },
 });
 
+class ConcurrencySemaphore {
+  private max: number;
+  private current = 0;
+  private queue: (() => void)[] = [];
+
+  constructor(max: number) {
+    this.max = max;
+  }
+
+  async acquire(): Promise<void> {
+    if (this.current < this.max) {
+      this.current++;
+      return;
+    }
+    return new Promise(resolve => this.queue.push(resolve));
+  }
+
+  release(): void {
+    this.current--;
+    const next = this.queue.shift();
+    if (next) {
+      this.current++;
+      next();
+    }
+  }
+
+  getCurrent(): number {
+    return this.current;
+  }
+}
+
 export class CarcaraRouter {
   private app: express.Application;
   private client: CarcaraClient;
@@ -34,7 +67,11 @@ export class CarcaraRouter {
   private metricsService: MetricsService;
   private reactAgent: any;
   private chatUseCase: ChatUseCase;
+  private approvalService: ApprovalService;
+  private codeParser: StreamingCodeParser;
   private port: number;
+  private semaphore: ConcurrencySemaphore;
+  private allowHostExecution: boolean;
 
   constructor(port: number = 3030) {
     this.port = port;
@@ -43,7 +80,11 @@ export class CarcaraRouter {
     this.agentEngine = new AgentEngine();
     this.memoryService = new MemoryService();
     this.metricsService = new MetricsService();
+    this.approvalService = new ApprovalService(false);
+    this.codeParser = new StreamingCodeParser();
     this.chatUseCase = new ChatUseCase(this.client as any, this.searchService as any);
+    this.semaphore = new ConcurrencySemaphore(3);
+    this.allowHostExecution = process.env.ALLOW_HOST_EXECUTION === 'true';
     this.app = express();
   }
 
@@ -73,14 +114,13 @@ export class CarcaraRouter {
       next();
     });
 
-    this.reactAgent = registerAllAgents(this.agentEngine, this.client, this.memoryService, this.metricsService);
+    this.reactAgent = registerAllAgents(
+      this.agentEngine, this.client, this.memoryService, this.metricsService,
+      this.allowHostExecution, this.approvalService
+    );
     this.client.setAgentEngine(this.agentEngine);
     this.client.setMemoryService(this.memoryService);
     this.client.setMetricsService(this.metricsService);
-
-    // ==========================================
-    // ROTAS OPENAI-COMPATIBLE
-    // ==========================================
 
     this.app.get('/v1/models', async (_req: Request, res: Response) => {
       try {
@@ -93,6 +133,7 @@ export class CarcaraRouter {
     });
 
     this.app.post('/v1/chat/completions', strictLimiter, async (req: Request, res: Response) => {
+      await this.semaphore.acquire();
       try {
         const agentId = req.headers['x-carcara-agent'] as string;
         if (agentId && req.body.messages?.length) {
@@ -170,6 +211,8 @@ export class CarcaraRouter {
       } catch (error: any) {
         console.error('Chat completion error:', error.message);
         res.status(500).json({ error: { message: error.message, type: 'api_error' } });
+      } finally {
+        this.semaphore.release();
       }
     });
 
@@ -198,12 +241,14 @@ export class CarcaraRouter {
       } catch (error: any) { res.status(500).json({ error: error.message }); }
     });
 
-    // ==========================================
-    // OLLAMA COMPATIBLE
-    // ==========================================
-
     this.app.get('/api/health', (_req: Request, res: Response) => {
-      res.json({ status: 'ok', initialized: this.client.isReady });
+      res.json({
+        status: 'ok',
+        initialized: this.client.isReady,
+        allowHostExecution: this.allowHostExecution,
+        concurrencyMax: 3,
+        concurrencyCurrent: this.semaphore.getCurrent(),
+      });
     });
 
     this.app.get('/api/tags', async (_req: Request, res: Response) => {
@@ -288,10 +333,6 @@ export class CarcaraRouter {
       } catch (error: any) { res.status(500).json({ error: error.message }); }
     });
 
-    // ==========================================
-    // MCP TOOLS
-    // ==========================================
-
     this.app.get('/mcp/list', async (_req: Request, res: Response) => {
       try {
         const tools = await this.client.listSdumontTools();
@@ -308,10 +349,6 @@ export class CarcaraRouter {
         res.json(result);
       } catch (error: any) { res.status(500).json({ error: error.message }); }
     });
-
-    // ==========================================
-    // SEARCH
-    // ==========================================
 
     this.app.post('/api/search', async (req: Request, res: Response) => {
       const { query, providers } = req.body;
@@ -333,9 +370,33 @@ export class CarcaraRouter {
 
     this.app.get('/ping', (_req: Request, res: Response) => res.json({ pong: true }));
 
-    // ==========================================
-    // LLAMAUI CONFIG
-    // ==========================================
+    this.app.get('/api/approval/pending', (_req: Request, res: Response) => {
+      res.json({ pending: this.approvalService.listPending() });
+    });
+
+    this.app.post('/api/approval/respond', (req: Request, res: Response) => {
+      const { id, approved } = req.body;
+      if (!id || approved === undefined) return res.status(400).json({ error: 'id and approved are required' });
+      const ok = this.approvalService.respond(id, approved);
+      res.json({ success: ok, id, approved });
+    });
+
+    this.app.get('/api/approval/:id', (req: Request, res: Response) => {
+      const req_ = this.approvalService.get(req.params.id);
+      if (!req_) return res.status(404).json({ error: 'Approval request not found' });
+      res.json(req_);
+    });
+
+    this.app.post('/api/parser/feed', (req: Request, res: Response) => {
+      const { token, reset } = req.body;
+      if (reset) this.codeParser.reset();
+      if (token) {
+        const result = this.codeParser.feed(token);
+        res.json(result);
+      } else {
+        res.json({ language: '', code: '', isComplete: false });
+      }
+    });
 
     this.app.get('/api/config', async (_req: Request, res: Response) => {
       try { const config = await this.client.llamaUI.getConfig(); res.json({ config }); }
@@ -404,24 +465,21 @@ export class CarcaraRouter {
       catch (error: any) { res.status(500).json({ error: error.message }); }
     });
 
-    // ==========================================
-    // START
-    // ==========================================
-
     await this.client.init();
 
     return new Promise<void>((resolve) => {
       this.app.listen(this.port, () => {
         console.log('╔═══════════════════════════════════════════════════════════════╗');
-        console.log('║      🤖 Carcara Proxy v3.1 - N-Layers                        ║');
-        console.log('║         Docker: ❌ removido | Agents: ' + this.agentEngine.list().length + '         ║');
+        console.log('║      🤖 Carcara Proxy v3.2 - N-Layers + ReAct Host           ║');
+        console.log(`║         HostExec: ${this.allowHostExecution ? '✅' : '❌'} | Concurrency: 3 | Agents: ${this.agentEngine.list().length}         ║`);
         console.log('╠═══════════════════════════════════════════════════════════════╣');
         console.log(`║  🌐 http://localhost:${this.port}                                    ║`);
         console.log('║  📋 OpenAI: /v1/models, /v1/chat/completions, /v1/embeddings  ║');
         console.log('║  📋 Ollama: /api/health, /api/tags, /api/chat, /api/generate  ║');
         console.log('║  🔧 MCP: /mcp/list, /mcp/call                                ║');
         console.log('║  🔍 Search: /api/search, /api/search/ddg, /api/search/wiki     ║');
-        console.log('║  🤖 Agentes: detectados automaticamente no chat               ║');
+        console.log('║  ✅ Approval: /api/approval/pending, /api/approval/respond     ║');
+        console.log('║  🤖 Agentes: ReAct com execucao host (Human-in-the-Loop)      ║');
         console.log('║  🧠 Memoria: .carcara/memory.jsonl                            ║');
         console.log('║  📊 Metricas: .carcara/metrics.jsonl                          ║');
         console.log('╚═══════════════════════════════════════════════════════════════╝');
