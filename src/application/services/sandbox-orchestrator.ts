@@ -8,7 +8,7 @@ export interface SwarmTask {
   agentType: 'backend' | 'frontend' | 'qa';
   action: 'read' | 'write' | 'compile' | 'test' | 'typecheck';
   targetPath: string;
-  content?: string;        // Base64 encoded quando write
+  content?: string;
   language?: string;
 }
 
@@ -21,16 +21,6 @@ export interface SwarmResult {
   durationMs: number;
 }
 
-/**
- * Orquestrador de sandbox com governança de segurança.
- * Regras:
- * - Back-End: read/write lógica de negócio apenas
- * - Front-End: read/write componentes visuais apenas
- * - QA: compile/test/typecheck apenas (runtime sandbox)
- * - Base64 encoding para transferência de código
- * - Interceptação de "Erro"/"Falha" → canal de exceções
- * - Timeout rígido de 30s
- */
 export class SandboxOrchestrator {
   private sandbox: GVisorSandboxService;
   private allowedPaths: Record<string, RegExp[]>;
@@ -40,7 +30,7 @@ export class SandboxOrchestrator {
     this.allowedPaths = {
       backend: [/^src\/(application|domain|infrastructure)\//, /^server\./, /^config\//],
       frontend: [/^src\/(presentation|components|pages)\//, /^public\//, /^styles\//],
-      qa: [/^.*$/], // QA pode acessar tudo para compilar/testar
+      qa: [/^.*$/],
     };
   }
 
@@ -48,7 +38,6 @@ export class SandboxOrchestrator {
     const start = Date.now();
     const errors: string[] = [];
 
-    // 1. Validação de permissão
     if (!this._checkPermission(task.agentType, task.targetPath)) {
       return {
         taskId: task.id,
@@ -79,7 +68,6 @@ export class SandboxOrchestrator {
           errors.push(`Acao desconhecida: ${task.action}`);
       }
 
-      // 2. Segregação de fluxo: interceptar "Erro"/"Falha"
       const hasError = this._detectFailure(output);
       if (hasError) {
         errors.push(...this._extractErrors(output));
@@ -116,7 +104,7 @@ export class SandboxOrchestrator {
   private async _readFile(filePath: string): Promise<string> {
     const { readFile } = await import('fs/promises');
     const content = await readFile(filePath, 'utf-8');
-    return Buffer.from(content).toString('base64'); // Base64 encoding
+    return Buffer.from(content).toString('base64');
   }
 
   private async _writeFile(filePath: string, base64Content: string): Promise<string> {
@@ -130,7 +118,8 @@ export class SandboxOrchestrator {
 
   private async _runInSandbox(task: SwarmTask): Promise<string> {
     const code = this._buildSandboxCommand(task);
-    const result = await this.sandbox.execute(code, 'bash', `swarm_${task.agentType}_${task.id}`);
+    const lang = this._resolveLanguage(task);
+    const result = await this.sandbox.execute(code, lang as any, `swarm_${task.agentType}_${task.id}`);
 
     let output = '';
     if (result.stdout) output += result.stdout;
@@ -138,6 +127,13 @@ export class SandboxOrchestrator {
     output += `\n[EXIT] ${result.exitCode} | ${result.durationMs}ms`;
 
     return output;
+  }
+
+  private _resolveLanguage(task: SwarmTask): string {
+    if (task.action === 'compile' || task.action === 'test' || task.action === 'typecheck') {
+      return 'node';
+    }
+    return task.language || 'bash';
   }
 
   private _buildSandboxCommand(task: SwarmTask): string {
@@ -174,6 +170,6 @@ export class SandboxOrchestrator {
         errors.push(line.trim());
       }
     }
-    return errors.slice(0, 20); // Max 20 erros
+    return errors.slice(0, 20);
   }
 }

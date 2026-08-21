@@ -18,11 +18,6 @@ export interface SupervisorConfig {
   supervisorModel: string;
 }
 
-/**
- * Supervisor LangGraph-style.
- * Recebe uma query, decompõe em plano, delega para workers,
- * recebe relatórios e decide próximo passo.
- */
 export class SupervisorAgent {
   private client: CarcaraClient;
   private orchestrator: SandboxOrchestrator;
@@ -48,21 +43,18 @@ export class SupervisorAgent {
       completed: false,
     };
 
-    // Passo 1: Criar plano
     state.plan = await this._createPlan(query);
     logger.info({ plan: state.plan }, 'Plano criado pelo Supervisor');
 
-    // Passo 2: Executar plano passo a passo
     for (let i = 0; i < Math.min(state.plan.length, this.config.maxIterations); i++) {
       state.currentStep = i;
       const step = state.plan[i];
       logger.info({ step: i + 1, total: state.plan.length, action: step }, 'Executando passo do plano');
 
-      const swarmTask = await this._parseStepToTask(step, i, task.id);
+      const swarmTask = await this._parseStepToTask(step, i, task.id || `swarm_${Date.now()}`);
       const result = await this.orchestrator.execute(swarmTask);
       state.results.push(result);
 
-      // Se falhou, tentar replanejar
       if (!result.success) {
         logger.warn({ step, errors: result.errors }, 'Falha no passo, replanejando...');
         const fixPlan = await this._replan(query, state);
@@ -82,13 +74,29 @@ export class SupervisorAgent {
     };
   }
 
+  private async _safeChat(prompt: string): Promise<string> {
+    try {
+      const response = await this.client.chatCompletion(prompt, this.config.supervisorModel);
+      if (!response || typeof response !== 'object') {
+        logger.warn({ response }, 'Resposta invalida do LLM');
+        return '';
+      }
+      if (!Array.isArray(response.choices)) {
+        logger.warn({ response }, 'Resposta sem choices do LLM');
+        return '';
+      }
+      const content = response.choices[0]?.message?.content;
+      return typeof content === 'string' ? content : '';
+    } catch (err: any) {
+      logger.error({ error: err.message }, 'Erro no chatCompletion do Supervisor');
+      return '';
+    }
+  }
+
   private async _createPlan(query: string): Promise<string[]> {
     const prompt = `Voce e um Supervisor de engenharia de software. Decomponha a seguinte tarefa em passos sequenciais para um enxame de agentes (backend, frontend, qa).\n\nTarefa: ${query}\n\nResponda APENAS com uma lista numerada de passos. Cada passo deve indicar o agente (BACKEND/FRONTEND/QA) e a acao.\nExemplo:\n1. BACKEND: Criar API endpoint em src/application/api.ts\n2. FRONTEND: Criar componente em src/components/Form.tsx\n3. QA: Executar testes`;
 
-    const response = await this.client.chatCompletion(prompt, this.config.supervisorModel);
-    const content = response.choices?.[0]?.message?.content || '';
-
-    // Extrair passos numerados
+    const content = await this._safeChat(prompt);
     const lines = content.split('\n').filter(l => /^\d+\./.test(l.trim()));
     return lines.length > 0 ? lines : ['1. QA: Analisar requisitos'];
   }
@@ -97,8 +105,7 @@ export class SupervisorAgent {
     const failedSteps = state.results.filter(r => !r.success).map(r => r.taskId);
     const prompt = `O plano atual falhou nos passos: ${failedSteps.join(', ')}.\nPlano original: ${state.plan.join('\n')}\n\nCrie um plano de correção com no maximo 3 passos adicionais.`;
 
-    const response = await this.client.chatCompletion(prompt, this.config.supervisorModel);
-    const content = response.choices?.[0]?.message?.content || '';
+    const content = await this._safeChat(prompt);
     const lines = content.split('\n').filter(l => /^\d+\./.test(l.trim()));
     return lines;
   }
@@ -118,7 +125,6 @@ export class SupervisorAgent {
     else if (upper.includes('TIPO') || upper.includes('TYPECHECK')) action = 'typecheck';
     else if (upper.includes('LER') || upper.includes('READ')) action = 'read';
 
-    // Extrair path do step (heurística simples)
     const pathMatch = step.match(/(src\/[^\s]+|server\.[^\s]+|config\/[^\s]+)/);
     const targetPath = pathMatch?.[0] || 'src/';
 
@@ -135,9 +141,8 @@ export class SupervisorAgent {
       `[${r.agentType.toUpperCase()}] ${r.success ? '✅' : '❌'} ${r.output.substring(0, 200)}`
     ).join('\n');
 
-    const prompt = `Sintetize o seguinte relatório de execucao em uma resposta final para o usuario.\n\nTarefa: ${state.query}\n\nResultados:\n${summary}`;
+    const prompt = `Sintetize o seguinte relatorio de execucao em uma resposta final para o usuario.\n\nTarefa: ${state.query}\n\nResultados:\n${summary}`;
 
-    const response = await this.client.chatCompletion(prompt, this.config.supervisorModel);
-    return response.choices?.[0]?.message?.content || 'Execucao completa.';
+    return await this._safeChat(prompt);
   }
 }

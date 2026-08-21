@@ -7,7 +7,7 @@ import pino from 'pino';
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
 const execAsync = promisify(exec);
 
-export type SandboxLanguage = 'python' | 'javascript' | 'typescript' | 'bash' | 'sh';
+export type SandboxLanguage = 'python' | 'javascript' | 'typescript' | 'bash' | 'sh' | 'node';
 
 export interface SandboxResult {
   stdout: string;
@@ -33,7 +33,7 @@ const DEFAULT_CONFIG: SandboxConfig = {
   memoryLimitMb: 512,
   cpuPercent: 50,
   networkEnabled: true,
-  allowedLanguages: ['python', 'javascript', 'bash'],
+  allowedLanguages: ['python', 'javascript', 'bash', 'node'],
   runtime: 'docker',
   blockInternalNetwork: true,
   containerPrefix: 'carcara-sandbox',
@@ -156,7 +156,6 @@ export class GVisorSandboxService {
     }
 
     if (runtime === 'gvisor') {
-      // gVisor via Docker com runtime runsc
       baseArgs.push('run', '--rm', '--runtime=runsc');
       if (blockInternalNetwork || !networkEnabled) {
         baseArgs.push('--network=none');
@@ -233,6 +232,7 @@ export class GVisorSandboxService {
       case 'python': return { fileName: 'main.py', image: 'python:3.11-alpine', cmd: ['python', '/sandbox/main.py'] };
       case 'javascript': return { fileName: 'main.js', image: 'node:20-alpine', cmd: ['node', '/sandbox/main.js'] };
       case 'typescript': return { fileName: 'main.ts', image: 'node:20-alpine', cmd: ['npx', 'tsx', '/sandbox/main.ts'] };
+      case 'node': return { fileName: 'main.sh', image: 'node:20-alpine', cmd: ['sh', '/sandbox/main.sh'] };
       case 'bash':
       case 'sh': return { fileName: 'main.sh', image: 'alpine:3.19', cmd: ['sh', '/sandbox/main.sh'] };
       default: throw new Error(`Linguagem nao suportada: ${lang}`);
@@ -241,7 +241,7 @@ export class GVisorSandboxService {
 
   setConfig(cfg: Partial<SandboxConfig>): void {
     this.config = { ...this.config, ...cfg };
-    this._runtimeAvailable = null; // Reset para re-detectar
+    this._runtimeAvailable = null;
   }
 
   getConfig(): SandboxConfig {
