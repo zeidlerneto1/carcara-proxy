@@ -147,6 +147,8 @@ export class SupervisorAgent {
       agentType,
       action,
       targetPath,
+      content: sanitizedStep,
+      language: targetPath.endsWith('.tsx') || targetPath.endsWith('.ts') ? 'typescript' : 'javascript',
     };
   }
 

@@ -2,6 +2,9 @@ import { GVisorSandboxService, SandboxResult } from '../../infrastructure/servic
 import pino from 'pino';
 import path from 'path';
 import os from 'os';
+import { BackendAgent } from '../../application/agents/swarm/backend-agent.js';
+import { FrontendAgent } from '../../application/agents/swarm/frontend-agent.js';
+import { CarcaraClient } from '../../infrastructure/clients/carcara-client.js';
 
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
 
@@ -28,9 +31,16 @@ export class SandboxOrchestrator {
   private allowedPaths: Record<string, RegExp[]>;
   private workDir: string;
 
-  constructor(sandbox: GVisorSandboxService) {
+  private client: CarcaraClient;
+  private backendAgent: BackendAgent;
+  private frontendAgent: FrontendAgent;
+
+  constructor(sandbox: GVisorSandboxService, client?: CarcaraClient) {
     this.sandbox = sandbox;
     this.workDir = path.join(os.tmpdir(), 'carcara-swarm-' + Date.now().toString(36));
+    this.client = client || (sandbox as any).client;
+    this.backendAgent = this.client ? new BackendAgent(this.client) : null as any;
+    this.frontendAgent = this.client ? new FrontendAgent(this.client) : null as any;
     this.allowedPaths = {
       backend: [/^src\/(application|domain|infrastructure)\//, /^server\./, /^config\//],
       frontend: [/^src\/(presentation|components|pages)\//, /^public\//, /^styles\//],
@@ -67,7 +77,17 @@ export class SandboxOrchestrator {
           output = await this._readFile(task.targetPath);
           break;
         case 'write':
-          output = await this._writeFile(task.targetPath, task.content || '');
+          let codeContent = task.content || '';
+          // Se nao houver content, gera via agente
+          if (!codeContent && this.client) {
+            const desc = task.id.replace(/_/g, ' ');
+            if (task.agentType === 'backend') {
+              codeContent = await this.backendAgent.generateCode(desc, task.targetPath, task.language || 'typescript');
+            } else if (task.agentType === 'frontend') {
+              codeContent = await this.frontendAgent.generateComponent(desc, path.basename(task.targetPath, path.extname(task.targetPath)), 'react');
+            }
+          }
+          output = await this._writeFile(task.targetPath, codeContent);
           break;
         case 'compile':
         case 'test':
@@ -150,14 +170,14 @@ export class SandboxOrchestrator {
   }
 
   private _buildSandboxCommand(task: SwarmTask): string {
-    const workDir = this.workDir.replace(/\\/g, '/');
+    // Dentro do container, workDir esta montado em /sandbox
     switch (task.action) {
       case 'compile':
-        return `cd "${workDir}" && npm install -g pnpm && pnpm install && pnpm run build 2>&1`;
+        return `cd /sandbox && npm install -g pnpm && pnpm install && pnpm run build 2>&1`;
       case 'test':
-        return `cd "${workDir}" && npm install -g pnpm && pnpm install && pnpm test 2>&1`;
+        return `cd /sandbox && npm install -g pnpm && pnpm install && pnpm test 2>&1`;
       case 'typecheck':
-        return `cd "${workDir}" && npm install -g pnpm && pnpm install && pnpm exec tsc --noEmit 2>&1`;
+        return `cd /sandbox && npm install -g pnpm && pnpm install && pnpm exec tsc --noEmit 2>&1`;
       default:
         return 'echo "Acao nao suportada"';
     }
