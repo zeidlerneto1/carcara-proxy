@@ -18,6 +18,7 @@ import { ApprovalService } from '../application/services/approval-service.js';
 import { AgentQueueService } from '../application/services/agent-queue-service.js';
 import { StreamingCodeParser } from '../infrastructure/parsers/streaming-code-parser.js';
 import { SandboxWebSocketServer } from './websocket-server.js';
+import readline from 'readline';
 import { ChatMessage, ToolCall } from '../types.js';
 
 const limiter = rateLimit({
@@ -80,6 +81,9 @@ export class CarcaraRouter {
   private agentQueue: AgentQueueService;
   private codeParser: StreamingCodeParser;
   private wsServer?: SandboxWebSocketServer;
+  private detectedRuntime: string = 'none';
+  private runtimeAvailable: boolean = false;
+  private containerNames: string[] = [];
   private port: number;
   private semaphore: ConcurrencySemaphore;
   private allowHostExecution: boolean;
@@ -95,6 +99,7 @@ export class CarcaraRouter {
       networkEnabled: process.env.SANDBOX_NETWORK !== 'false',
       blockInternalNetwork: process.env.SANDBOX_BLOCK_INTERNAL !== 'false',
     });
+    this._detectRuntime();
     this.agentEngine = new AgentEngine();
     this.memoryService = new MemoryService();
     this.metricsService = new MetricsService();
@@ -113,6 +118,20 @@ export class CarcaraRouter {
 
   getApp(): express.Application {
     return this.app;
+  }
+
+  private async _detectRuntime(): Promise<void> {
+    const preferred = this.sandboxService.getConfig().runtime;
+    const available = await this.sandboxService.detectRuntime();
+    this.runtimeAvailable = available;
+
+    if (available) {
+      this.detectedRuntime = preferred;
+      logger.info({ runtime: preferred }, '🐳 Runtime de sandbox detectado');
+    } else {
+      this.detectedRuntime = 'none';
+      logger.warn({ runtime: preferred }, '🐳 Runtime de sandbox NAO disponivel');
+    }
   }
 
   private extractText(content: any): string {
@@ -441,6 +460,12 @@ export class CarcaraRouter {
 
         const result = await this.sandboxService.execute(code, language, sessionId);
 
+        // Rastrear container para cleanup no SIGINT
+        if (!this.containerNames.includes(result.containerName)) {
+          this.containerNames.push(result.containerName);
+          console.log(`🐳 Container criado: ${result.containerName} (${this.containerNames.length} total)`);
+        }
+
         // Broadcast logs
         if (result.stdout) this.wsServer?.broadcastLog({ type: 'stdout', data: result.stdout, containerId: sessionId });
         if (result.stderr) this.wsServer?.broadcastLog({ type: 'stderr', data: result.stderr, containerId: sessionId });
@@ -451,6 +476,7 @@ export class CarcaraRouter {
           stderr: result.stderr,
           exitCode: result.exitCode,
           durationMs: result.durationMs,
+          containerName: result.containerName,
         });
       } catch (error: any) {
         res.status(500).json({ error: error.message });
@@ -588,11 +614,15 @@ export class CarcaraRouter {
 
     await this.client.init();
 
+    // SIGINT handler: pergunta ao usuario sobre cleanup de containers
+    process.on('SIGINT', () => this._handleSigint());
+
     return new Promise<void>((resolve) => {
       const printBanner = () => {
         console.log('╔═══════════════════════════════════════════════════════════════╗');
         console.log('║      🤖 Carcara Proxy v3.3 - N-Layers + gVisor Sandbox       ║');
-        console.log(`║         Sandbox: ${this.sandboxService.getConfig().runtime} | Concurrency: ${this.semaphore.getMax()} | Agents: ${this.agentEngine.list().length}         ║`);
+        const rtIcon = this.runtimeAvailable ? '✅' : '❌';
+        console.log(`║         Sandbox: ${this.detectedRuntime} ${rtIcon} | Concurrency: ${this.semaphore.getMax()} | Agents: ${this.agentEngine.list().length}         ║`);
         console.log('╠═══════════════════════════════════════════════════════════════╣');
         console.log(`║  🌐 http://localhost:${this.port}                                    ║`);
         console.log('║  📋 OpenAI: /v1/models, /v1/chat/completions, /v1/embeddings  ║');
@@ -655,6 +685,55 @@ export class CarcaraRouter {
         choices: [{ index: 0, message: { role: 'assistant', content, tool_calls: toolCalls }, finish_reason: toolCalls?.length ? 'tool_calls' : 'stop' }],
         usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
       });
+    }
+  }
+
+  private _handleSigint(): void {
+    console.log('\n\n⚠️  Ctrl+C detectado. Encerrando servidor...');
+
+    if (!this.runtimeAvailable || this.containerNames.length === 0) {
+      console.log('🧹 Nenhum container sandbox para limpar.');
+      this.stop().then(() => process.exit(0));
+      return;
+    }
+
+    console.log(`\n📦 Containers criados nesta sessao: ${this.containerNames.length}`);
+    this.containerNames.forEach((name, i) => {
+      console.log(`   ${i + 1}. ${name}`);
+    });
+
+    const rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout,
+    });
+
+    rl.question('\n🗑️  Deseja deletar os containers sandbox? [s/N]: ', (answer) => {
+      rl.close();
+      if (answer.toLowerCase() === 's' || answer.toLowerCase() === 'sim') {
+        console.log('🗑️  Deletando containers...');
+        this._cleanupContainers().then(() => {
+          console.log('✅ Containers removidos.');
+          this.stop().then(() => process.exit(0));
+        });
+      } else {
+        console.log('⏭️  Containers preservados.');
+        this.stop().then(() => process.exit(0));
+      }
+    });
+  }
+
+  private async _cleanupContainers(): Promise<void> {
+    const { exec } = await import('child_process');
+    const { promisify } = await import('util');
+    const execAsync = promisify(exec);
+
+    for (const name of this.containerNames) {
+      try {
+        await execAsync(`docker rm -f ${name} 2>/dev/null || podman rm -f ${name} 2>/dev/null || true`);
+        console.log(`   ✅ ${name} removido`);
+      } catch {
+        console.log(`   ⚠️  ${name} nao encontrado ou ja removido`);
+      }
     }
   }
 

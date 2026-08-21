@@ -14,6 +14,7 @@ export interface SandboxResult {
   stderr: string;
   exitCode: number;
   durationMs: number;
+  containerName: string;
 }
 
 export interface SandboxConfig {
@@ -99,7 +100,7 @@ export class GVisorSandboxService {
     const durationMs = Date.now() - startTime;
 
     logger.info({ container: containerName, language, exitCode: result.exitCode, durationMs }, 'Execucao sandbox completa');
-    return { ...result, durationMs };
+    return { ...result, durationMs, containerName };
   }
 
   private async runContainer(name: string, image: string, workDir: string, cmd: string[]): Promise<SandboxResult> {
@@ -242,5 +243,17 @@ export class GVisorSandboxService {
 
   getConfig(): SandboxConfig {
     return { ...this.config };
+  }
+
+  async getActiveContainers(): Promise<string[]> {
+    const { exec } = await import('child_process');
+    const { promisify } = await import('util');
+    const execAsync = promisify(exec);
+    try {
+      const { stdout } = await execAsync(`docker ps --filter "name=${this.config.containerPrefix}" --format "{{.Names}}" 2>/dev/null || podman ps --filter "name=${this.config.containerPrefix}" --format "{{.Names}}" 2>/dev/null`);
+      return stdout.split('\n').filter(Boolean);
+    } catch {
+      return [];
+    }
   }
 }
