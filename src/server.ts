@@ -1,4 +1,5 @@
 import dotenv from 'dotenv';
+import http from 'http';
 import { CarcaraRouter } from './presentation/api-router.js';
 
 dotenv.config();
@@ -7,7 +8,9 @@ const PORT = parseInt(process.env.PORT || '3030', 10);
 
 async function main() {
   const router = new CarcaraRouter(PORT);
-  await router.start();
+  const app = router.getApp();
+  const server = http.createServer(app);
+  await router.start(server);
 }
 
 main().catch(console.error);

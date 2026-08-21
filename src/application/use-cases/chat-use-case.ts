@@ -1,6 +1,7 @@
 import pino from 'pino';
 import { ILLMClient } from '../ports/illm-client.js';
 import { ISearchService } from '../ports/isearch-service.js';
+import { GVisorSandboxService } from '../../infrastructure/services/gvisor-sandbox-service.js';
 
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
 
@@ -25,10 +26,12 @@ export interface ToolCallRequest {
 export class ChatUseCase {
   private llmClient: ILLMClient;
   private searchService: ISearchService;
+  private sandboxService: GVisorSandboxService;
 
-  constructor(llmClient: ILLMClient, searchService: ISearchService) {
+  constructor(llmClient: ILLMClient, searchService: ISearchService, sandboxService: GVisorSandboxService) {
     this.llmClient = llmClient;
     this.searchService = searchService;
+    this.sandboxService = sandboxService;
   }
 
   getNativeTools(): NativeTool[] {
@@ -37,7 +40,7 @@ export class ChatUseCase {
         type: 'function',
         function: {
           name: 'web_search',
-          description: 'Busca informações na web usando DuckDuckGo ou Wikipedia.',
+          description: 'Busca informacoes na web usando DuckDuckGo ou Wikipedia.',
           parameters: {
             type: 'object',
             properties: {
@@ -51,12 +54,27 @@ export class ChatUseCase {
       {
         type: 'function',
         function: {
-          name: 'calculate',
-          description: 'Realiza cálculos matemáticos precisos.',
+          name: 'sandbox_exec',
+          description: 'Executa codigo Python, JavaScript ou Bash em sandbox isolado (Docker/Podman/gVisor) com limite de 30s e 512MB.',
           parameters: {
             type: 'object',
             properties: {
-              expression: { type: 'string', description: 'Expressão matemática' },
+              code: { type: 'string', description: 'Codigo completo' },
+              language: { type: 'string', enum: ['python', 'javascript', 'bash'], description: 'Linguagem' },
+            },
+            required: ['code', 'language'],
+          },
+        },
+      },
+      {
+        type: 'function',
+        function: {
+          name: 'calculate',
+          description: 'Realiza calculos matematicos precisos.',
+          parameters: {
+            type: 'object',
+            properties: {
+              expression: { type: 'string', description: 'Expressao matematica' },
             },
             required: ['expression'],
           },
@@ -84,6 +102,16 @@ export class ChatUseCase {
         case 'web_search': {
           const result = await this.searchService.search(args.query, args.provider ? [args.provider] : undefined);
           return JSON.stringify(result).slice(0, 4000);
+        }
+        case 'sandbox_exec': {
+          const runtimeOk = await this.sandboxService.detectRuntime();
+          if (!runtimeOk) return 'ERRO: Runtime de sandbox (Docker/Podman/gVisor) nao disponivel.';
+          const result = await this.sandboxService.execute(args.code, args.language || 'python');
+          let out = '';
+          if (result.stdout) out += `stdout:\n${result.stdout}\n`;
+          if (result.stderr) out += `stderr:\n${result.stderr}\n`;
+          out += `exitCode: ${result.exitCode} | duration: ${result.durationMs}ms`;
+          return out.slice(0, 4000);
         }
         case 'calculate': {
           try { const fn = new Function('return (' + args.expression + ')'); return String(fn()); }

@@ -26,7 +26,8 @@
     "express-rate-limit": "^7.4.0",
     "helmet": "^7.1.0",
     "pino": "^9.0.0",
-    "playwright": "^1.47.0"
+    "playwright": "^1.47.0",
+    "ws": "^8.16.0"
   },
   "devDependencies": {
     "@playwright/test": "^1.47.0",
@@ -40,11 +41,23 @@
     "prettier": "^3.3.0",
     "tsup": "^8.0.0",
     "tsx": "^4.0.0",
-    "typescript": "^5.5.0"
+    "typescript": "^5.5.0",
+    "@types/ws": "^8.5.10"
   },
   "keywords": [
-    "lncc", "carcara", "sinapad", "openrouter", "llama", "playwright",
-    "typescript", "chatbot", "ai", "mcp", "santos-dumont", "hpc", "api-wrapper"
+    "lncc",
+    "carcara",
+    "sinapad",
+    "openrouter",
+    "llama",
+    "playwright",
+    "typescript",
+    "chatbot",
+    "ai",
+    "mcp",
+    "santos-dumont",
+    "hpc",
+    "api-wrapper"
   ],
   "author": "Peter Zeidler",
   "license": "MIT",

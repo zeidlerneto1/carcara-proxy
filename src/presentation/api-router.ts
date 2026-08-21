@@ -3,9 +3,11 @@ import cors from 'cors';
 import compression from 'compression';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
+import { Server } from 'http';
 import { CarcaraClient } from '../carcara-client.js';
 import { customMCPTools } from '../mcp-tools.js';
 import { SearchService } from '../infrastructure/services/search-service.js';
+import { GVisorSandboxService } from '../infrastructure/services/gvisor-sandbox-service.js';
 import { LlamaUIConfigService, MCPServerConfig } from '../llama-ui-config.js';
 import { AgentEngine } from '../application/agents/agent-engine.js';
 import { MemoryService } from '../memory-service.js';
@@ -13,7 +15,9 @@ import { MetricsService } from '../metrics-service.js';
 import { registerAllAgents } from '../agents/index.js';
 import { ChatUseCase } from '../application/use-cases/chat-use-case.js';
 import { ApprovalService } from '../application/services/approval-service.js';
+import { AgentQueueService } from '../application/services/agent-queue-service.js';
 import { StreamingCodeParser } from '../infrastructure/parsers/streaming-code-parser.js';
+import { SandboxWebSocketServer } from './websocket-server.js';
 import { ChatMessage, ToolCall } from '../types.js';
 
 const limiter = rateLimit({
@@ -62,13 +66,16 @@ export class CarcaraRouter {
   private app: express.Application;
   private client: CarcaraClient;
   private searchService: SearchService;
+  private sandboxService: GVisorSandboxService;
   private agentEngine: AgentEngine;
   private memoryService: MemoryService;
   private metricsService: MetricsService;
   private reactAgent: any;
   private chatUseCase: ChatUseCase;
   private approvalService: ApprovalService;
+  private agentQueue: AgentQueueService;
   private codeParser: StreamingCodeParser;
+  private wsServer?: SandboxWebSocketServer;
   private port: number;
   private semaphore: ConcurrencySemaphore;
   private allowHostExecution: boolean;
@@ -77,15 +84,31 @@ export class CarcaraRouter {
     this.port = port;
     this.client = new CarcaraClient({ domain: 'LNCC' });
     this.searchService = new SearchService();
+    this.sandboxService = new GVisorSandboxService({
+      runtime: (process.env.SANDBOX_RUNTIME as any) || 'docker',
+      memoryLimitMb: parseInt(process.env.SANDBOX_MEMORY_MB || '512', 10),
+      cpuPercent: parseInt(process.env.SANDBOX_CPU_PERCENT || '50', 10),
+      networkEnabled: process.env.SANDBOX_NETWORK !== 'false',
+      blockInternalNetwork: process.env.SANDBOX_BLOCK_INTERNAL !== 'false',
+    });
     this.agentEngine = new AgentEngine();
     this.memoryService = new MemoryService();
     this.metricsService = new MetricsService();
     this.approvalService = new ApprovalService(false);
+    this.agentQueue = new AgentQueueService(
+      parseInt(process.env.MAX_CONCURRENCY || '3', 10),
+      process.env.SUPERVISOR_MODEL || 'Qwen3.6-35B',
+      process.env.WORKER_MODEL || 'DeepSeek-v4-Flash-0731'
+    );
     this.codeParser = new StreamingCodeParser();
-    this.chatUseCase = new ChatUseCase(this.client as any, this.searchService as any);
-    this.semaphore = new ConcurrencySemaphore(3);
+    this.chatUseCase = new ChatUseCase(this.client as any, this.searchService as any, this.sandboxService);
+    this.semaphore = new ConcurrencySemaphore(parseInt(process.env.MAX_CONCURRENCY || '3', 10));
     this.allowHostExecution = process.env.ALLOW_HOST_EXECUTION === 'true';
     this.app = express();
+  }
+
+  getApp(): express.Application {
+    return this.app;
   }
 
   private extractText(content: any): string {
@@ -102,7 +125,7 @@ export class CarcaraRouter {
     return String(content);
   }
 
-  async start(): Promise<void> {
+  async start(httpServer?: Server): Promise<void> {
     this.app.use(helmet({ contentSecurityPolicy: false, crossOriginEmbedderPolicy: false }));
     this.app.use(cors());
     this.app.use(compression());
@@ -121,6 +144,13 @@ export class CarcaraRouter {
     this.client.setAgentEngine(this.agentEngine);
     this.client.setMemoryService(this.memoryService);
     this.client.setMetricsService(this.metricsService);
+
+    // WebSocket server
+    if (httpServer) {
+      this.wsServer = new SandboxWebSocketServer(httpServer, '/ws/sandbox');
+    }
+
+    // ===== OPENAI-COMPATIBLE =====
 
     this.app.get('/v1/models', async (_req: Request, res: Response) => {
       try {
@@ -241,13 +271,18 @@ export class CarcaraRouter {
       } catch (error: any) { res.status(500).json({ error: error.message }); }
     });
 
+    // ===== OLLAMA COMPATIBLE =====
+
     this.app.get('/api/health', (_req: Request, res: Response) => {
       res.json({
         status: 'ok',
         initialized: this.client.isReady,
         allowHostExecution: this.allowHostExecution,
-        concurrencyMax: 3,
+        concurrencyMax: this.semaphore['max'] || 3,
         concurrencyCurrent: this.semaphore.getCurrent(),
+        sandboxRuntime: this.sandboxService.getConfig().runtime,
+        sandboxAvailable: this.sandboxService.runtimeAvailable,
+        wsSessions: this.wsServer?.getActiveSessions() || 0,
       });
     });
 
@@ -333,6 +368,8 @@ export class CarcaraRouter {
       } catch (error: any) { res.status(500).json({ error: error.message }); }
     });
 
+    // ===== MCP TOOLS =====
+
     this.app.get('/mcp/list', async (_req: Request, res: Response) => {
       try {
         const tools = await this.client.listSdumontTools();
@@ -349,6 +386,8 @@ export class CarcaraRouter {
         res.json(result);
       } catch (error: any) { res.status(500).json({ error: error.message }); }
     });
+
+    // ===== SEARCH =====
 
     this.app.post('/api/search', async (req: Request, res: Response) => {
       const { query, providers } = req.body;
@@ -370,6 +409,72 @@ export class CarcaraRouter {
 
     this.app.get('/ping', (_req: Request, res: Response) => res.json({ pong: true }));
 
+    // ===== SANDBOX =====
+
+    this.app.get('/api/sandbox/status', async (_req: Request, res: Response) => {
+      const available = await this.sandboxService.detectRuntime();
+      const cfg = this.sandboxService.getConfig();
+      res.json({
+        available,
+        runtime: cfg.runtime,
+        config: {
+          memoryLimitMb: cfg.memoryLimitMb,
+          cpuPercent: cfg.cpuPercent,
+          networkEnabled: cfg.networkEnabled,
+          blockInternalNetwork: cfg.blockInternalNetwork,
+          allowedLanguages: cfg.allowedLanguages,
+        },
+      });
+    });
+
+    this.app.post('/api/sandbox/exec', strictLimiter, async (req: Request, res: Response) => {
+      try {
+        const { code, language, sessionId } = req.body;
+        if (!code || !language) return res.status(400).json({ error: 'code and language required' });
+
+        // Broadcast start
+        this.wsServer?.broadcastLog({ type: 'start', data: `Executando ${language}...`, containerId: sessionId });
+
+        const result = await this.sandboxService.execute(code, language, sessionId);
+
+        // Broadcast logs
+        if (result.stdout) this.wsServer?.broadcastLog({ type: 'stdout', data: result.stdout, containerId: sessionId });
+        if (result.stderr) this.wsServer?.broadcastLog({ type: 'stderr', data: result.stderr, containerId: sessionId });
+        this.wsServer?.broadcastLog({ type: 'end', data: `exitCode=${result.exitCode} | ${result.durationMs}ms`, containerId: sessionId });
+
+        res.json({
+          stdout: result.stdout,
+          stderr: result.stderr,
+          exitCode: result.exitCode,
+          durationMs: result.durationMs,
+        });
+      } catch (error: any) {
+        res.status(500).json({ error: error.message });
+      }
+    });
+
+    this.app.post('/api/sandbox/config', (req: Request, res: Response) => {
+      this.sandboxService.setConfig(req.body);
+      res.json({ success: true, config: this.sandboxService.getConfig() });
+    });
+
+    // ===== AGENT QUEUE =====
+
+    this.app.get('/api/queue/stats', (_req: Request, res: Response) => {
+      res.json(this.agentQueue.getStats());
+    });
+
+    this.app.get('/api/queue/pending', (_req: Request, res: Response) => {
+      res.json({ pending: this.agentQueue.listPending() });
+    });
+
+    this.app.post('/api/queue/clear', (_req: Request, res: Response) => {
+      this.agentQueue.clear();
+      res.json({ success: true });
+    });
+
+    // ===== APPROVAL =====
+
     this.app.get('/api/approval/pending', (_req: Request, res: Response) => {
       res.json({ pending: this.approvalService.listPending() });
     });
@@ -387,6 +492,8 @@ export class CarcaraRouter {
       res.json(req_);
     });
 
+    // ===== STREAM PARSER =====
+
     this.app.post('/api/parser/feed', (req: Request, res: Response) => {
       const { token, reset } = req.body;
       if (reset) this.codeParser.reset();
@@ -397,6 +504,14 @@ export class CarcaraRouter {
         res.json({ language: '', code: '', isComplete: false });
       }
     });
+
+    // ===== WS STATS =====
+
+    this.app.get('/api/ws/sessions', (_req: Request, res: Response) => {
+      res.json({ activeSessions: this.wsServer?.getActiveSessions() || 0 });
+    });
+
+    // ===== LLAMAUI CONFIG =====
 
     this.app.get('/api/config', async (_req: Request, res: Response) => {
       try { const config = await this.client.llamaUI.getConfig(); res.json({ config }); }
@@ -465,26 +580,36 @@ export class CarcaraRouter {
       catch (error: any) { res.status(500).json({ error: error.message }); }
     });
 
+    // ===== START SERVER =====
+
     await this.client.init();
 
     return new Promise<void>((resolve) => {
-      this.app.listen(this.port, () => {
+      const srv = httpServer || this.app.listen(this.port, () => {
         console.log('╔═══════════════════════════════════════════════════════════════╗');
-        console.log('║      🤖 Carcara Proxy v3.2 - N-Layers + ReAct Host           ║');
-        console.log(`║         HostExec: ${this.allowHostExecution ? '✅' : '❌'} | Concurrency: 3 | Agents: ${this.agentEngine.list().length}         ║`);
+        console.log('║      🤖 Carcara Proxy v3.3 - N-Layers + gVisor Sandbox       ║');
+        console.log(`║         Sandbox: ${this.sandboxService.getConfig().runtime} | Concurrency: ${this.semaphore['max'] || 3} | Agents: ${this.agentEngine.list().length}         ║`);
         console.log('╠═══════════════════════════════════════════════════════════════╣');
         console.log(`║  🌐 http://localhost:${this.port}                                    ║`);
         console.log('║  📋 OpenAI: /v1/models, /v1/chat/completions, /v1/embeddings  ║');
         console.log('║  📋 Ollama: /api/health, /api/tags, /api/chat, /api/generate  ║');
         console.log('║  🔧 MCP: /mcp/list, /mcp/call                                ║');
         console.log('║  🔍 Search: /api/search, /api/search/ddg, /api/search/wiki     ║');
+        console.log('║  🐳 Sandbox: /api/sandbox/status, /api/sandbox/exec            ║');
+        console.log('║  📊 Queue: /api/queue/stats, /api/queue/pending                ║');
         console.log('║  ✅ Approval: /api/approval/pending, /api/approval/respond     ║');
-        console.log('║  🤖 Agentes: ReAct com execucao host (Human-in-the-Loop)      ║');
+        console.log('║  🔌 WebSocket: ws://localhost:3030/ws/sandbox (Xterm.js)      ║');
+        console.log('║  🤖 Agentes: ReAct com execucao sandbox gVisor                ║');
         console.log('║  🧠 Memoria: .carcara/memory.jsonl                            ║');
         console.log('║  📊 Metricas: .carcara/metrics.jsonl                          ║');
         console.log('╚═══════════════════════════════════════════════════════════════╝');
         resolve();
       });
+      if (!httpServer && srv) {
+        (srv as any).on('error', (err: any) => {
+          console.error('Server error:', err);
+        });
+      }
     });
   }
 
@@ -523,6 +648,7 @@ export class CarcaraRouter {
   }
 
   async stop(): Promise<void> {
+    this.wsServer?.close();
     await this.client.close();
     this.metricsService.stop();
   }
