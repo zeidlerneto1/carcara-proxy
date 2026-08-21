@@ -60,6 +60,10 @@ class ConcurrencySemaphore {
   getCurrent(): number {
     return this.current;
   }
+
+  getMax(): number {
+    return this.max;
+  }
 }
 
 export class CarcaraRouter {
@@ -278,7 +282,7 @@ export class CarcaraRouter {
         status: 'ok',
         initialized: this.client.isReady,
         allowHostExecution: this.allowHostExecution,
-        concurrencyMax: this.semaphore['max'] || 3,
+        concurrencyMax: this.semaphore.getMax(),
         concurrencyCurrent: this.semaphore.getCurrent(),
         sandboxRuntime: this.sandboxService.getConfig().runtime,
         sandboxAvailable: this.sandboxService.runtimeAvailable,
@@ -585,10 +589,10 @@ export class CarcaraRouter {
     await this.client.init();
 
     return new Promise<void>((resolve) => {
-      const srv = httpServer || this.app.listen(this.port, () => {
+      const printBanner = () => {
         console.log('╔═══════════════════════════════════════════════════════════════╗');
         console.log('║      🤖 Carcara Proxy v3.3 - N-Layers + gVisor Sandbox       ║');
-        console.log(`║         Sandbox: ${this.sandboxService.getConfig().runtime} | Concurrency: ${this.semaphore['max'] || 3} | Agents: ${this.agentEngine.list().length}         ║`);
+        console.log(`║         Sandbox: ${this.sandboxService.getConfig().runtime} | Concurrency: ${this.semaphore.getMax()} | Agents: ${this.agentEngine.list().length}         ║`);
         console.log('╠═══════════════════════════════════════════════════════════════╣');
         console.log(`║  🌐 http://localhost:${this.port}                                    ║`);
         console.log('║  📋 OpenAI: /v1/models, /v1/chat/completions, /v1/embeddings  ║');
@@ -604,9 +608,16 @@ export class CarcaraRouter {
         console.log('║  📊 Metricas: .carcara/metrics.jsonl                          ║');
         console.log('╚═══════════════════════════════════════════════════════════════╝');
         resolve();
-      });
-      if (!httpServer && srv) {
-        (srv as any).on('error', (err: any) => {
+      };
+
+      if (httpServer) {
+        httpServer.listen(this.port, printBanner);
+        httpServer.on('error', (err: any) => {
+          console.error('Server error:', err);
+        });
+      } else {
+        const srv = this.app.listen(this.port, printBanner);
+        srv.on('error', (err: any) => {
           console.error('Server error:', err);
         });
       }
